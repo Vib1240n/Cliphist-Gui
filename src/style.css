@@ -1,0 +1,166 @@
+/* ===========================================================
+ * cliphist-gui - Clipboard Manager Theme
+ * Location: ~/.config/cliphist-gui/style.css
+ * =========================================================== */
+
+window {
+  background-color: transparent;
+}
+
+.clip-container {
+  background-color: alpha(#141618, 0.92);
+  border-radius: 16px;
+  border: 1px solid alpha(#57595c, 0.3);
+  padding: 0;
+}
+
+/* -- Header -- */
+
+.clip-header {
+  padding: 20px 24px 4px 24px;
+}
+
+.clip-search-row {
+  margin-bottom: 4px;
+}
+
+.clip-search {
+  background-color: alpha(#292c30, 0.6);
+  border: 1px solid alpha(#57595c, 0.2);
+  border-radius: 10px;
+  padding: 10px 14px 10px 14px;
+  color: #fcfcfc;
+  font-size: 15px;
+  min-height: 22px;
+}
+
+.clip-search:focus {
+  border-color: alpha(#3daee9, 0.5);
+}
+
+.clip-esc-badge {
+  background-color: alpha(#57595c, 0.35);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: alpha(#fcfcfc, 0.5);
+  margin-right: 4px;
+}
+
+.clip-hint-text {
+  color: alpha(#fcfcfc, 0.35);
+  font-size: 11px;
+}
+
+.clip-section-label {
+  color: alpha(#fcfcfc, 0.55);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 4px 4px 4px;
+}
+
+/* -- List -- */
+
+.clip-list {
+  background-color: transparent;
+}
+
+.clip-list row {
+  background-color: transparent;
+  border-radius: 12px;
+  margin: 1px 8px;
+  padding: 10px 14px;
+  transition: background-color 150ms ease;
+}
+
+.clip-list row:hover {
+  background-color: alpha(#3daee9, 0.08);
+}
+
+.clip-list row:selected {
+  background-color: alpha(#3daee9, 0.15);
+}
+
+/* -- Thumbnails & Icons -- */
+
+.clip-thumb-frame {
+  border-radius: 10px;
+  min-width: 48px;
+  min-height: 48px;
+  background-color: alpha(#292c30, 0.5);
+}
+
+.clip-thumb {
+  border-radius: 10px;
+}
+
+.clip-text-icon {
+  background-color: alpha(#292c30, 0.8);
+  border-radius: 10px;
+  min-width: 48px;
+  min-height: 48px;
+}
+
+.clip-text-icon-label {
+  color: alpha(#3daee9, 0.6);
+  font-size: 20px;
+  font-weight: bold;
+}
+
+/* -- Content -- */
+
+.clip-title {
+  color: #fcfcfc;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.clip-subtitle {
+  color: alpha(#fcfcfc, 0.4);
+  font-size: 11px;
+  margin-top: 1px;
+}
+
+/* -- Badge -- */
+
+.clip-badge {
+  background-color: transparent;
+  font-size: 10px;
+  color: alpha(#fcfcfc, 0.35);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.clip-time {
+  color: alpha(#fcfcfc, 0.25);
+  font-size: 10px;
+  margin-top: 2px;
+}
+
+/* -- Status Bar -- */
+
+.clip-status-bar {
+  padding: 10px 24px;
+  border-top: 1px solid alpha(#57595c, 0.15);
+}
+
+.clip-status-left {
+  color: alpha(#fcfcfc, 0.3);
+  font-size: 11px;
+}
+
+.clip-status-key {
+  background-color: alpha(#57595c, 0.3);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: alpha(#fcfcfc, 0.45);
+}
+
+.clip-status-hint {
+  color: alpha(#fcfcfc, 0.3);
+  font-size: 10px;
+  margin-left: 4px;
+}
