@@ -1,0 +1,17 @@
+[package]
+name = "cliphist-gui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "cliphist-gui"
+path = "main.rs"
+
+[dependencies]
+common = { path = "../common" }
+gtk4 = "0.9"
+gtk4-layer-shell = "0.4"
+gdk4 = "0.9"
+glib = "0.20"
+gio = "0.20"
+libc = "0.2"

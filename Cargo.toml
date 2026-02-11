@@ -1,16 +1,7 @@
-[package]
-name = "cliphist-gui"
-version = "0.1.0"
-edition = "2021"
+[workspace]
+members = ["src/common", "src/cliphist", "src/launcher"]
+resolver = "2"
 
-[dependencies]
-gtk4 = "0.9"
-gtk4-layer-shell = "0.4"
-gdk4 = "0.9"
-glib = "0.20"
-gio = "0.20"
-cairo-rs = { version = "0.20", features = ["png"] }
-libc = "0.2"
 [profile.release]
 opt-level = "s"
 lto = true

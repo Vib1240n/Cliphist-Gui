@@ -1,56 +1,31 @@
-#!/usr/bin/env bash
-# Build and install cliphist-gui
-# Dependencies: gtk4, gtk4-layer-shell, rust/cargo, cliphist, wl-clipboard, imagemagick
+#!/bin/bash
 
-set -e
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
-
-echo "-- Checking dependencies..."
-for cmd in cargo cliphist wl-copy magick; do
-    if ! command -v "$cmd" &>/dev/null; then
-        echo "ERROR: $cmd not found. Please install it first."
-        exit 1
-    fi
-done
-
-# Check GTK4 and layer shell dev packages
-if ! pkg-config --exists gtk4 2>/dev/null; then
-    echo "ERROR: gtk4 dev package not found."
-    echo "  Arch: sudo pacman -S gtk4"
+# 1. Build the project
+echo "Starting Install and Building using Cargo"
+if cargo build --release -p cliphist-gui -p launch-gui; then
+    echo "Build successful."
+else
+    echo "Build failed."
     exit 1
 fi
 
-if ! pkg-config --exists gtk4-layer-shell-0 2>/dev/null; then
-    echo "ERROR: gtk4-layer-shell not found."
-    echo "  Arch: sudo pacman -S gtk4-layer-shell"
-    exit 1
-fi
+# 2. Kill existing processes
+echo "Killing existing processes"
+pkill cliphist-gui
+echo "Cliphist-gui killed"
+pkill launch-gui
+echo "launch-gui killed"
+# Short sleep to ensure file handles are released
+sleep 0.5
 
-echo "-- Building release binary..."
-cargo build --release
+# 3. Copy binaries to local bin
+echo "copying binaries to location ~/.local/bin/"
+cp target/release/launch-gui ~/.local/bin/
+cp target/release/cliphist-gui ~/.local/bin/
 
-BINARY="target/release/cliphist-gui"
-if [[ ! -f "$BINARY" ]]; then
-    echo "ERROR: Build failed, binary not found."
-    exit 1
-fi
+# 4. Restart daemons in the background
+echo "Starting new proccesses"
+~/.local/bin/cliphist-gui > /dev/null 2>&1 &
+~/.local/bin/launch-gui > /dev/null 2>&1 &
 
-SIZE=$(du -h "$BINARY" | cut -f1)
-echo "-- Binary size: $SIZE"
-
-echo "-- Installing to ~/.local/bin/"
-mkdir -p ~/.local/bin
-cp "$BINARY" ~/.local/bin/cliphist-gui
-chmod +x ~/.local/bin/cliphist-gui
-
-echo "-- Done. Binary installed to ~/.local/bin/cliphist-gui"
-echo ""
-echo "Add to your Hyprland config:"
-echo "  bind = HYPER, V, exec, cliphist-gui"
-echo ""
-echo "Add window rules:"
-echo "  windowrulev2 = float, class:(com.vib1240n.cliphist-gui)"
-echo "  windowrulev2 = pin, class:(com.vib1240n.cliphist-gui)"
-echo "  windowrulev2 = stayfocused, class:(com.vib1240n.cliphist-gui)"
+echo "Done! cliphist-gui and launch-gui are running."

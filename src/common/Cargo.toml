@@ -1,0 +1,12 @@
+[package]
+name = "common"
+version = "0.1.0"
+edition = "2021"
+[lib]
+path = "lib.rs"
+[dependencies]
+gtk4 = "0.9"
+gtk4-layer-shell = "0.4"
+gdk4 = "0.9"
+glib = "0.20"
+libc = "0.2"
