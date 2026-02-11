@@ -2,9 +2,9 @@
 
 A lightweight clipboard manager for Wayland, built with GTK4 and Layer Shell. Designed as a visual frontend for [cliphist](https://github.com/sentriz/cliphist) with image previews, fuzzy search, and full keyboard control.
 
-![cliphist-gui](https://github.com/vib1240n/cliphist-gui/assets/preview.png)
+![cliphist-gui](./assets/preview.png)
 
-## Why?
+## Purpose
 
 I wanted a clipboard manager that:
 
@@ -12,6 +12,7 @@ I wanted a clipboard manager that:
 - Something that was light weight and performant and not hogging up too many resources.
 - Has a clean, transparent UI but that can be styled to whatever and follow any design language.
 - Doesn't pull in a full desktop framework just to list clipboard entries
+- Wanted to learn Rust and how it works
 
 I tried rofi and some other options but none were looking good or I wasn't able to style them how I wanted.
 
@@ -119,7 +120,9 @@ cliphist-gui --help             Show help
 
 ## Default Configuration
 
-### `~/.config/cliphist-gui/config`
+### Default config
+
+#### `~/.config/cliphist-gui/config`
 
 ```ini
 [window]
@@ -155,7 +158,9 @@ last = End
 
 Multiple keys per action are space-separated. Modifiers use `+` notation: `Ctrl+u`, `Shift+Tab`, `Alt+d`.
 
-### `~/.config/cliphist-gui/style.css`
+### Default Styling
+
+#### `~/.config/cliphist-gui/style.css`
 
 Standard GTK4 CSS. The default theme uses translucent backgrounds for compositor blur. Key classes:
 
