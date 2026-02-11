@@ -14,66 +14,9 @@ use std::process::Command;
 use std::rc::Rc;
 
 const THUMB_SIZE: u32 = 64;
-const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024; // 10MB
-
-// ---------------------------------------------------------------------------
-// Logging
-// ---------------------------------------------------------------------------
-
-fn log_dir() -> PathBuf {
-    std::env::var("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(std::env::var("HOME").unwrap_or("/tmp".into())).join(".local/state")
-        })
-        .join("cliphist-gui")
-}
-
-fn log_path() -> PathBuf {
-    log_dir().join("cliphist-gui.log")
-}
-
-fn log(msg: &str) {
-    let dir = log_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let path = log_path();
-
-    // Rotate if > 10MB
-    if let Ok(meta) = std::fs::metadata(&path) {
-        if meta.len() > MAX_LOG_SIZE {
-            let rotated = dir.join("cliphist-gui.log.1");
-            let _ = std::fs::rename(&path, &rotated);
-        }
-    }
-
-    let timestamp = {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        // Simple timestamp: seconds since epoch -> readable via date command
-        // For proper formatting without chrono, use libc
-        let mut buf = [0u8; 64];
-        let len = unsafe {
-            let t = now as libc::time_t;
-            let mut tm: libc::tm = std::mem::zeroed();
-            libc::localtime_r(&t, &mut tm);
-            libc::strftime(
-                buf.as_mut_ptr() as *mut libc::c_char,
-                buf.len(),
-                b"%Y-%m-%d %H:%M:%S\0".as_ptr() as *const libc::c_char,
-                &tm,
-            )
-        };
-        String::from_utf8_lossy(&buf[..len]).to_string()
-    };
-
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "[{}] {}", timestamp, msg);
-    }
-}
 const MAX_TEXT_PREVIEW: usize = 120;
 const MAX_SUB_PREVIEW: usize = 60;
+const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 struct Config {
@@ -99,6 +42,97 @@ enum Anchor { Center, Top, TopLeft, TopRight, Bottom, BottomLeft, BottomRight, C
 
 #[derive(Clone, Debug)]
 struct KeyCombo { key: gdk4::Key, mods: gdk4::ModifierType }
+
+#[derive(Clone, Debug)]
+struct ClipEntry {
+    raw_line: String,
+    #[allow(dead_code)] id: String,
+    preview: String,
+    is_image: bool,
+    thumb_path: Option<PathBuf>,
+}
+
+struct AppWidgets {
+    search: Entry,
+    listbox: ListBox,
+    status: Label,
+    entries: Rc<RefCell<Vec<ClipEntry>>>,
+}
+
+thread_local! {
+    static WIDGETS: RefCell<Option<AppWidgets>> = RefCell::new(None);
+    static CONFIG: RefCell<Config> = RefCell::new(Config::default());
+}
+
+// logging stuff
+
+fn log_dir() -> PathBuf {
+    std::env::var("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(std::env::var("HOME").unwrap_or("/tmp".into())).join(".local/state")
+        })
+        .join("cliphist-gui")
+}
+
+fn log_path() -> PathBuf { log_dir().join("cliphist-gui.log") }
+
+fn log(msg: &str) {
+    let dir = log_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = log_path();
+
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > MAX_LOG_SIZE {
+            let _ = std::fs::rename(&path, dir.join("cliphist-gui.log.1"));
+        }
+    }
+
+    let timestamp = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let mut buf = [0u8; 64];
+        let len = unsafe {
+            let t = now as libc::time_t;
+            let mut tm: libc::tm = std::mem::zeroed();
+            libc::localtime_r(&t, &mut tm);
+            libc::strftime(
+                buf.as_mut_ptr() as *mut libc::c_char, buf.len(),
+                b"%Y-%m-%d %H:%M:%S\0".as_ptr() as *const libc::c_char, &tm,
+            )
+        };
+        String::from_utf8_lossy(&buf[..len]).to_string()
+    };
+
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "[{}] {}", timestamp, msg);
+    }
+}
+
+// xdg paths
+
+fn cache_dir() -> PathBuf {
+    let d = std::env::var("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|_| {
+        PathBuf::from(std::env::var("HOME").unwrap_or("/tmp".into())).join(".cache")
+    }).join("cliphist-gui").join("thumbs");
+    std::fs::create_dir_all(&d).ok();
+    d
+}
+
+fn config_dir() -> PathBuf {
+    std::env::var("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|_| {
+        PathBuf::from(std::env::var("HOME").unwrap_or("/tmp".into())).join(".config")
+    }).join("cliphist-gui")
+}
+
+fn shellexpand(s: &str) -> String {
+    if s.starts_with("~/") {
+        if let Ok(h) = std::env::var("HOME") { return format!("{}/{}", h, &s[2..]); }
+    }
+    s.to_string()
+}
+
+// config
 
 impl Config {
     fn default() -> Self {
@@ -136,11 +170,16 @@ impl Config {
         kb.insert(Action::Last, vec![
             KeyCombo { key: gdk4::Key::End, mods: gdk4::ModifierType::empty() },
         ]);
+
         Self {
-            width: 580, height: 520, anchor: Anchor::Center,
+            width: 580, height: 520,
+            anchor: Anchor::Center,
             margin_top: 0, margin_bottom: 0, margin_left: 0, margin_right: 0,
             theme: config_dir().join("style.css").to_string_lossy().to_string(),
-            max_items: 0, close_on_select: true, notify_on_copy: false, keybinds: kb,
+            max_items: 0,
+            close_on_select: true,
+            notify_on_copy: false,
+            keybinds: kb,
         }
     }
 
@@ -156,17 +195,21 @@ impl Config {
     fn parse(content: &str) -> Self {
         let mut cfg = Self::default();
         let mut section = String::new();
+
         for line in content.lines() {
             let t = line.trim();
             if t.is_empty() || t.starts_with('#') { continue; }
+
             if t.starts_with('[') && t.ends_with(']') {
                 section = t[1..t.len()-1].trim().to_lowercase();
                 continue;
             }
+
             let (key, val) = match t.split_once('=') {
                 Some((k, v)) => (k.trim().to_lowercase(), v.trim().to_string()),
                 None => continue,
             };
+
             match section.as_str() {
                 "window" => match key.as_str() {
                     "width" => { cfg.width = val.parse().unwrap_or(cfg.width); }
@@ -200,7 +243,8 @@ impl Config {
 
 fn parse_anchor(s: &str) -> Anchor {
     match s.to_lowercase().replace('-', "_").as_str() {
-        "center" => Anchor::Center, "top" => Anchor::Top,
+        "center" => Anchor::Center,
+        "top" => Anchor::Top,
         "top_left" | "topleft" => Anchor::TopLeft,
         "top_right" | "topright" => Anchor::TopRight,
         "bottom" => Anchor::Bottom,
@@ -220,11 +264,14 @@ fn parse_bool(s: &str, default: bool) -> bool {
 }
 
 fn parse_action(s: &str) -> Option<Action> {
-    match s { "select" => Some(Action::Select), "delete" => Some(Action::Delete),
+    match s {
+        "select" => Some(Action::Select), "delete" => Some(Action::Delete),
         "clear_search" => Some(Action::ClearSearch), "close" => Some(Action::Close),
         "next" => Some(Action::Next), "prev" => Some(Action::Prev),
         "page_down" => Some(Action::PageDown), "page_up" => Some(Action::PageUp),
-        "first" => Some(Action::First), "last" => Some(Action::Last), _ => None }
+        "first" => Some(Action::First), "last" => Some(Action::Last),
+        _ => None
+    }
 }
 
 fn parse_key_combos(s: &str) -> Vec<KeyCombo> {
@@ -235,6 +282,7 @@ fn parse_single_combo(s: &str) -> Option<KeyCombo> {
     let parts: Vec<&str> = s.split('+').collect();
     let mut mods = gdk4::ModifierType::empty();
     let key_str = parts.last()?;
+
     for &p in &parts[..parts.len()-1] {
         match p.to_lowercase().as_str() {
             "ctrl" | "control" => mods |= gdk4::ModifierType::CONTROL_MASK,
@@ -244,15 +292,19 @@ fn parse_single_combo(s: &str) -> Option<KeyCombo> {
             _ => { log(&format!("unknown modifier: {}", p)); }
         }
     }
+
     let key = match key_str.to_lowercase().as_str() {
         "return" | "enter" => gdk4::Key::Return,
         "escape" | "esc" => gdk4::Key::Escape,
         "tab" => gdk4::Key::Tab,
         "delete" | "del" => gdk4::Key::Delete,
         "backspace" => gdk4::Key::BackSpace,
-        "up" => gdk4::Key::Up, "down" => gdk4::Key::Down,
-        "left" => gdk4::Key::Left, "right" => gdk4::Key::Right,
-        "home" => gdk4::Key::Home, "end" => gdk4::Key::End,
+        "up" => gdk4::Key::Up,
+        "down" => gdk4::Key::Down,
+        "left" => gdk4::Key::Left,
+        "right" => gdk4::Key::Right,
+        "home" => gdk4::Key::Home,
+        "end" => gdk4::Key::End,
         "page_up" | "pageup" | "pgup" => gdk4::Key::Page_Up,
         "page_down" | "pagedown" | "pgdn" => gdk4::Key::Page_Down,
         "space" => gdk4::Key::space,
@@ -262,53 +314,26 @@ fn parse_single_combo(s: &str) -> Option<KeyCombo> {
     Some(KeyCombo { key, mods })
 }
 
-fn shellexpand(s: &str) -> String {
-    if s.starts_with("~/") {
-        if let Ok(h) = std::env::var("HOME") { return format!("{}/{}", h, &s[2..]); }
-    }
-    s.to_string()
-}
-
 fn default_config() -> &'static str { include_str!("config.default") }
+fn default_css() -> &'static str { include_str!("style.css") }
 
-// -- Data --
-
-#[derive(Clone, Debug)]
-struct ClipEntry {
-    raw_line: String,
-    #[allow(dead_code)] id: String,
-    preview: String,
-    is_image: bool,
-    thumb_path: Option<PathBuf>,
-}
-
-fn cache_dir() -> PathBuf {
-    let d = dirs_cache().join("cliphist-gui").join("thumbs");
-    std::fs::create_dir_all(&d).ok(); d
-}
-
-fn dirs_cache() -> PathBuf {
-    std::env::var("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|_| {
-        PathBuf::from(std::env::var("HOME").unwrap_or("/tmp".into())).join(".cache")
-    })
-}
-
-fn config_dir() -> PathBuf {
-    std::env::var("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|_| {
-        PathBuf::from(std::env::var("HOME").unwrap_or("/tmp".into())).join(".config")
-    }).join("cliphist-gui")
-}
+// cliphist stuff
 
 fn fetch_entries(max_items: usize) -> Vec<ClipEntry> {
     let output = match Command::new("cliphist").arg("list").output() {
-        Ok(o) => o, Err(_) => return Vec::new(),
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let cache = cache_dir();
+
     let iter = stdout.lines().filter(|l| !l.is_empty());
     let iter: Box<dyn Iterator<Item = &str>> = if max_items > 0 {
         Box::new(iter.take(max_items))
-    } else { Box::new(iter) };
+    } else {
+        Box::new(iter)
+    };
+
     iter.map(|line| {
         let raw_line = line.to_string();
         let (id, preview) = match line.split_once('\t') {
@@ -320,25 +345,39 @@ fn fetch_entries(max_items: usize) -> Vec<ClipEntry> {
             let path = cache.join(format!("{}.png", id));
             if !path.exists() { generate_thumbnail(&raw_line, &path); }
             if path.exists() { Some(path) } else { None }
-        } else { None };
+        } else {
+            None
+        };
         ClipEntry { raw_line, id, preview, is_image, thumb_path }
     }).collect()
 }
 
 fn generate_thumbnail(raw_line: &str, out_path: &PathBuf) {
     if let Some(mut child) = Command::new("cliphist").arg("decode")
-        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null()).spawn().ok()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn().ok()
     {
-        if let Some(mut si) = child.stdin.take() { let _ = si.write_all(raw_line.as_bytes()); drop(si); }
+        if let Some(mut si) = child.stdin.take() {
+            let _ = si.write_all(raw_line.as_bytes());
+            drop(si);
+        }
         if let Ok(out) = child.wait_with_output() {
             if out.status.success() && !out.stdout.is_empty() {
                 if let Some(mut m) = Command::new("magick")
-                    .args(["png:-","-resize",&format!("{}x{}>",THUMB_SIZE*2,THUMB_SIZE*2),&format!("png:{}",out_path.display())])
-                    .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null()).spawn().ok()
+                    .args(["png:-", "-resize",
+                        &format!("{}x{}>", THUMB_SIZE * 2, THUMB_SIZE * 2),
+                        &format!("png:{}", out_path.display())])
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn().ok()
                 {
-                    if let Some(mut si) = m.stdin.take() { let _ = si.write_all(&out.stdout); drop(si); }
+                    if let Some(mut si) = m.stdin.take() {
+                        let _ = si.write_all(&out.stdout);
+                        drop(si);
+                    }
                     let _ = m.wait();
                 }
             }
@@ -348,20 +387,30 @@ fn generate_thumbnail(raw_line: &str, out_path: &PathBuf) {
 
 fn select_entry(entry: &ClipEntry, notify: bool) {
     let mut dec = Command::new("cliphist").arg("decode")
-        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null()).spawn().expect("cliphist decode failed");
-    if let Some(mut si) = dec.stdin.take() { let _ = si.write_all(entry.raw_line.as_bytes()); drop(si); }
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn().expect("cliphist decode failed");
+
+    if let Some(mut si) = dec.stdin.take() {
+        let _ = si.write_all(entry.raw_line.as_bytes());
+        drop(si);
+    }
     if let Ok(out) = dec.wait_with_output() {
         if out.status.success() {
             let mime = if entry.is_image { "image/png" } else { "text/plain" };
             let mut wl = Command::new("wl-copy").args(["--type", mime])
                 .stdin(std::process::Stdio::piped()).spawn().expect("wl-copy failed");
-            if let Some(mut si) = wl.stdin.take() { let _ = si.write_all(&out.stdout); drop(si); }
+            if let Some(mut si) = wl.stdin.take() {
+                let _ = si.write_all(&out.stdout);
+                drop(si);
+            }
             let _ = wl.wait();
+
             if notify {
                 let msg = if entry.is_image { "Image copied".to_string() }
-                    else { format!("Copied: {}", char_truncate(&entry.preview, 50)) };
-                let _ = Command::new("notify-send").args(["-t","2000","cliphist-gui",&msg]).spawn();
+                else { format!("Copied: {}", char_truncate(&entry.preview, 50)) };
+                let _ = Command::new("notify-send").args(["-t", "2000", "cliphist-gui", &msg]).spawn();
             }
         }
     }
@@ -371,13 +420,16 @@ fn delete_entry(entry: &ClipEntry) {
     if let Some(mut c) = Command::new("cliphist").arg("delete")
         .stdin(std::process::Stdio::piped()).spawn().ok()
     {
-        if let Some(mut si) = c.stdin.take() { let _ = si.write_all(entry.raw_line.as_bytes()); drop(si); }
+        if let Some(mut si) = c.stdin.take() {
+            let _ = si.write_all(entry.raw_line.as_bytes());
+            drop(si);
+        }
         let _ = c.wait();
     }
     if let Some(ref p) = entry.thumb_path { let _ = std::fs::remove_file(p); }
 }
 
-// -- Helpers --
+// helpers
 
 fn content_type(e: &ClipEntry) -> &'static str {
     if e.is_image { return "IMAGE"; }
@@ -388,20 +440,31 @@ fn content_type(e: &ClipEntry) -> &'static str {
 fn parse_image_meta(preview: &str) -> Option<String> {
     let inner = preview.trim_start_matches("[[ binary data").trim_end_matches("]]").trim();
     let parts: Vec<&str> = inner.split_whitespace().collect();
-    let mut dims = None; let mut fmt = None;
+    let mut dims = None;
+    let mut fmt = None;
+
     for p in &parts {
-        if p.contains('x') && p.chars().all(|c| c.is_ascii_digit() || c == 'x') { dims = Some(p.to_string()); }
-        if ["png","jpg","jpeg","gif","bmp","webp"].contains(&p.to_lowercase().as_str()) { fmt = Some(p.to_uppercase()); }
+        if p.contains('x') && p.chars().all(|c| c.is_ascii_digit() || c == 'x') {
+            dims = Some(p.to_string());
+        }
+        if ["png", "jpg", "jpeg", "gif", "bmp", "webp"].contains(&p.to_lowercase().as_str()) {
+            fmt = Some(p.to_uppercase());
+        }
     }
+
     match (dims, fmt) {
         (Some(d), Some(f)) => Some(format!("{} -- {}", d, f)),
-        (Some(d), None) => Some(d), (None, Some(f)) => Some(f), _ => None,
+        (Some(d), None) => Some(d),
+        (None, Some(f)) => Some(f),
+        _ => None,
     }
 }
 
 fn char_truncate(s: &str, max: usize) -> String {
     let t = s.trim().replace('\n', " ").replace('\t', " ");
-    if t.chars().count() > max { format!("{}...", t.chars().take(max).collect::<String>()) } else { t }
+    if t.chars().count() > max {
+        format!("{}...", t.chars().take(max).collect::<String>())
+    } else { t }
 }
 
 fn get_cursor_position() -> (i32, i32) {
@@ -418,18 +481,39 @@ fn load_css(cfg: &Config) -> String {
     let p = PathBuf::from(&cfg.theme);
     if p.exists() {
         if let Ok(css) = std::fs::read_to_string(&p) {
-            log(&format!("loaded css from {}", p.display())); return css;
+            log(&format!("loaded css from {}", p.display()));
+            return css;
         }
     }
     log(&format!("theme not found: {}, using default", cfg.theme));
     default_css().to_string()
 }
 
-fn default_css() -> &'static str { include_str!("style.css") }
+fn match_action(cfg: &Config, key: gdk4::Key, mods: gdk4::ModifierType) -> Option<Action> {
+    let relevant = gdk4::ModifierType::CONTROL_MASK | gdk4::ModifierType::SHIFT_MASK
+        | gdk4::ModifierType::ALT_MASK | gdk4::ModifierType::SUPER_MASK;
+    let pressed = mods & relevant;
+    for (action, combos) in &cfg.keybinds {
+        for combo in combos {
+            if combo.key == key && combo.mods == pressed {
+                return Some(action.clone());
+            }
+        }
+    }
+    None
+}
 
-// ---------------------------------------------------------------------------
-// UI
-// ---------------------------------------------------------------------------
+fn get_filtered_entry(entries: &[ClipEntry], query: &str, idx: usize) -> Option<ClipEntry> {
+    let q = query.to_lowercase();
+    let filtered: Vec<&ClipEntry> = if q.is_empty() {
+        entries.iter().collect()
+    } else {
+        entries.iter().filter(|e| e.preview.to_lowercase().contains(&q)).collect()
+    };
+    filtered.get(idx).map(|e| (*e).clone())
+}
+
+// ui building
 
 fn build_row(entry: &ClipEntry) -> ListBoxRow {
     let row = ListBoxRow::new();
@@ -464,9 +548,11 @@ fn build_row(entry: &ClipEntry) -> ListBoxRow {
     let content = GtkBox::new(Orientation::Vertical, 0);
     content.set_hexpand(true);
     content.set_valign(Align::Center);
+
     let ctype = content_type(entry);
     let title_text = if entry.is_image { "Image".to_string() }
-        else { char_truncate(&entry.preview, MAX_TEXT_PREVIEW) };
+    else { char_truncate(&entry.preview, MAX_TEXT_PREVIEW) };
+
     let title = Label::new(Some(&title_text));
     title.set_xalign(0.0);
     title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
@@ -476,7 +562,10 @@ fn build_row(entry: &ClipEntry) -> ListBoxRow {
 
     let sub_text = if entry.is_image {
         parse_image_meta(&entry.preview).unwrap_or_default()
-    } else { char_truncate(&entry.preview, MAX_SUB_PREVIEW) };
+    } else {
+        char_truncate(&entry.preview, MAX_SUB_PREVIEW)
+    };
+
     if !sub_text.is_empty() {
         let sub = Label::new(Some(&sub_text));
         sub.set_xalign(0.0);
@@ -485,6 +574,7 @@ fn build_row(entry: &ClipEntry) -> ListBoxRow {
         sub.add_css_class("clip-subtitle");
         content.append(&sub);
     }
+
     hbox.append(&content);
 
     let right = GtkBox::new(Orientation::Vertical, 2);
@@ -511,7 +601,9 @@ fn populate_list(listbox: &ListBox, entries: &[ClipEntry], query: &str) -> usize
             count += 1;
         }
     }
-    if let Some(first) = listbox.row_at_index(0) { listbox.select_row(Some(&first)); }
+    if let Some(first) = listbox.row_at_index(0) {
+        listbox.select_row(Some(&first));
+    }
     count
 }
 
@@ -519,11 +611,23 @@ fn apply_anchor(window: &ApplicationWindow, cfg: &Config) {
     match cfg.anchor {
         Anchor::Center => {}
         Anchor::Top => { window.set_anchor(Edge::Top, true); }
-        Anchor::TopLeft => { window.set_anchor(Edge::Top, true); window.set_anchor(Edge::Left, true); }
-        Anchor::TopRight => { window.set_anchor(Edge::Top, true); window.set_anchor(Edge::Right, true); }
+        Anchor::TopLeft => {
+            window.set_anchor(Edge::Top, true);
+            window.set_anchor(Edge::Left, true);
+        }
+        Anchor::TopRight => {
+            window.set_anchor(Edge::Top, true);
+            window.set_anchor(Edge::Right, true);
+        }
         Anchor::Bottom => { window.set_anchor(Edge::Bottom, true); }
-        Anchor::BottomLeft => { window.set_anchor(Edge::Bottom, true); window.set_anchor(Edge::Left, true); }
-        Anchor::BottomRight => { window.set_anchor(Edge::Bottom, true); window.set_anchor(Edge::Right, true); }
+        Anchor::BottomLeft => {
+            window.set_anchor(Edge::Bottom, true);
+            window.set_anchor(Edge::Left, true);
+        }
+        Anchor::BottomRight => {
+            window.set_anchor(Edge::Bottom, true);
+            window.set_anchor(Edge::Right, true);
+        }
         Anchor::Cursor => {
             let (cx, cy) = get_cursor_position();
             window.set_anchor(Edge::Top, true);
@@ -532,54 +636,24 @@ fn apply_anchor(window: &ApplicationWindow, cfg: &Config) {
             window.set_margin(Edge::Left, cx);
         }
     }
+
     if cfg.margin_top != 0 { window.set_margin(Edge::Top, cfg.margin_top); }
     if cfg.margin_bottom != 0 { window.set_margin(Edge::Bottom, cfg.margin_bottom); }
     if cfg.margin_left != 0 { window.set_margin(Edge::Left, cfg.margin_left); }
     if cfg.margin_right != 0 { window.set_margin(Edge::Right, cfg.margin_right); }
 }
 
-fn match_action(cfg: &Config, key: gdk4::Key, mods: gdk4::ModifierType) -> Option<Action> {
-    let relevant = gdk4::ModifierType::CONTROL_MASK | gdk4::ModifierType::SHIFT_MASK
-        | gdk4::ModifierType::ALT_MASK | gdk4::ModifierType::SUPER_MASK;
-    let pressed = mods & relevant;
-    for (action, combos) in &cfg.keybinds {
-        for combo in combos {
-            if combo.key == key && combo.mods == pressed { return Some(action.clone()); }
-        }
-    }
-    None
-}
-
-fn get_filtered_entry(entries: &[ClipEntry], query: &str, idx: usize) -> Option<ClipEntry> {
-    let q = query.to_lowercase();
-    let filtered: Vec<&ClipEntry> = if q.is_empty() { entries.iter().collect() }
-        else { entries.iter().filter(|e| e.preview.to_lowercase().contains(&q)).collect() };
-    filtered.get(idx).map(|e| (*e).clone())
-}
-
-// ---------------------------------------------------------------------------
-// App state
-// ---------------------------------------------------------------------------
-
-struct AppWidgets {
-    search: Entry,
-    listbox: ListBox,
-    status: Label,
-    entries: Rc<RefCell<Vec<ClipEntry>>>,
-}
-
-thread_local! {
-    static WIDGETS: RefCell<Option<AppWidgets>> = RefCell::new(None);
-    static CONFIG: RefCell<Config> = RefCell::new(Config::default());
-}
+// main window
 
 fn activate(app: &Application) {
     let cfg = Config::load();
     CONFIG.with(|c| *c.borrow_mut() = cfg.clone());
 
+    // toggle if already running
     if let Some(win) = app.active_window() {
-        if win.is_visible() { win.set_visible(false); }
-        else {
+        if win.is_visible() {
+            win.set_visible(false);
+        } else {
             if cfg.anchor == Anchor::Cursor {
                 let (cx, cy) = get_cursor_position();
                 win.set_margin(Edge::Top, cy);
@@ -601,17 +675,23 @@ fn activate(app: &Application) {
         return;
     }
 
+    // first launch
     let provider = CssProvider::new();
     provider.load_from_data(&load_css(&cfg));
     gtk4::style_context_add_provider_for_display(
         &gdk4::Display::default().expect("no display"),
-        &provider, gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        &provider,
+        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
 
     let entries: Rc<RefCell<Vec<ClipEntry>>> = Rc::new(RefCell::new(Vec::new()));
+
     let window = ApplicationWindow::builder()
-        .application(app).default_width(cfg.width).default_height(cfg.height)
-        .resizable(false).build();
+        .application(app)
+        .default_width(cfg.width)
+        .default_height(cfg.height)
+        .resizable(false)
+        .build();
 
     window.init_layer_shell();
     window.set_layer(Layer::Overlay);
@@ -624,9 +704,10 @@ fn activate(app: &Application) {
     container.add_css_class("clip-container");
     container.set_size_request(cfg.width, cfg.height);
 
-    // Header
+    // header + search
     let header = GtkBox::new(Orientation::Vertical, 0);
     header.add_css_class("clip-header");
+
     let search_row = GtkBox::new(Orientation::Horizontal, 8);
     search_row.add_css_class("clip-search-row");
     let search = Entry::new();
@@ -634,6 +715,7 @@ fn activate(app: &Application) {
     search.add_css_class("clip-search");
     search.set_hexpand(true);
     search_row.append(&search);
+
     let hint_box = GtkBox::new(Orientation::Horizontal, 4);
     hint_box.set_valign(Align::Center);
     let esc_badge = Label::new(Some("esc"));
@@ -644,13 +726,14 @@ fn activate(app: &Application) {
     hint_box.append(&hint_text);
     search_row.append(&hint_box);
     header.append(&search_row);
+
     let recent_label = Label::new(Some("Recent"));
     recent_label.set_xalign(0.0);
     recent_label.add_css_class("clip-section-label");
     header.append(&recent_label);
     container.append(&header);
 
-    // List
+    // scrollable list
     let scroll = ScrolledWindow::new();
     scroll.set_vexpand(true);
     scroll.set_hscrollbar_policy(gtk4::PolicyType::Never);
@@ -661,7 +744,7 @@ fn activate(app: &Application) {
     scroll.set_child(Some(&listbox));
     container.append(&scroll);
 
-    // Status bar
+    // bottom bar
     let status_bar = GtkBox::new(Orientation::Horizontal, 0);
     status_bar.add_css_class("clip-status-bar");
     let status = Label::new(Some("0 items"));
@@ -669,19 +752,24 @@ fn activate(app: &Application) {
     status.set_halign(Align::Start);
     status.set_hexpand(true);
     status_bar.append(&status);
+
     let hints = GtkBox::new(Orientation::Horizontal, 12);
     hints.set_halign(Align::End);
     for (k, h) in [("Enter", "select"), ("Del", "delete")] {
         let b = GtkBox::new(Orientation::Horizontal, 0);
-        let kl = Label::new(Some(k)); kl.add_css_class("clip-status-key"); b.append(&kl);
-        let hl = Label::new(Some(h)); hl.add_css_class("clip-status-hint"); b.append(&hl);
+        let kl = Label::new(Some(k));
+        kl.add_css_class("clip-status-key");
+        b.append(&kl);
+        let hl = Label::new(Some(h));
+        hl.add_css_class("clip-status-hint");
+        b.append(&hl);
         hints.append(&b);
     }
     status_bar.append(&hints);
     container.append(&status_bar);
     window.set_child(Some(&container));
 
-    // Search filter
+    // search filtering
     let entries_f = entries.clone();
     let listbox_f = listbox.clone();
     let status_f = status.clone();
@@ -692,7 +780,7 @@ fn activate(app: &Application) {
         status_f.set_text(&format!("{} items", n));
     });
 
-    // Keyboard
+    // keybinds
     let key_ctrl = EventControllerKey::new();
     key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
     let ek = entries.clone();
@@ -700,6 +788,7 @@ fn activate(app: &Application) {
     let wk = window.clone();
     let sk = search.clone();
     let stk = status.clone();
+
     key_ctrl.connect_key_pressed(move |_, key, _, mods| {
         let action = CONFIG.with(|c| match_action(&c.borrow(), key, mods));
         let close = CONFIG.with(|c| c.borrow().close_on_select);
@@ -734,12 +823,18 @@ fn activate(app: &Application) {
                 Action::ClearSearch => { sk.set_text(""); }
                 Action::Next => {
                     if let Some(r) = lk.selected_row() {
-                        if let Some(n) = lk.row_at_index(r.index() + 1) { lk.select_row(Some(&n)); }
+                        if let Some(n) = lk.row_at_index(r.index() + 1) {
+                            lk.select_row(Some(&n));
+                        }
                     }
                 }
                 Action::Prev => {
                     if let Some(r) = lk.selected_row() {
-                        if r.index() > 0 { if let Some(p) = lk.row_at_index(r.index() - 1) { lk.select_row(Some(&p)); } }
+                        if r.index() > 0 {
+                            if let Some(p) = lk.row_at_index(r.index() - 1) {
+                                lk.select_row(Some(&p));
+                            }
+                        }
                     }
                 }
                 Action::PageDown => {
@@ -759,7 +854,9 @@ fn activate(app: &Application) {
                 }
                 Action::Last => {
                     let n = lk.observe_children().n_items();
-                    if n > 0 { if let Some(r) = lk.row_at_index(n as i32 - 1) { lk.select_row(Some(&r)); } }
+                    if n > 0 {
+                        if let Some(r) = lk.row_at_index(n as i32 - 1) { lk.select_row(Some(&r)); }
+                    }
                 }
             }
             return glib::Propagation::Stop;
@@ -768,7 +865,7 @@ fn activate(app: &Application) {
     });
     window.add_controller(key_ctrl);
 
-    // Click
+    // click to select
     let ec = entries.clone();
     let wc = window.clone();
     let sc = search.clone();
@@ -783,22 +880,27 @@ fn activate(app: &Application) {
 
     WIDGETS.with(|w| {
         *w.borrow_mut() = Some(AppWidgets {
-            search: search.clone(), listbox: listbox.clone(),
-            status: status.clone(), entries: entries.clone(),
+            search: search.clone(),
+            listbox: listbox.clone(),
+            status: status.clone(),
+            entries: entries.clone(),
         });
     });
 
-    { let mut ents = entries.borrow_mut(); *ents = fetch_entries(cfg.max_items);
-      let n = populate_list(&listbox, &ents, ""); status.set_text(&format!("{} items", n)); }
+    // load entries
+    {
+        let mut ents = entries.borrow_mut();
+        *ents = fetch_entries(cfg.max_items);
+        let n = populate_list(&listbox, &ents, "");
+        status.set_text(&format!("{} items", n));
+    }
 
     window.present();
     search.grab_focus();
     log(&format!("daemon started ({}x{}, anchor={:?})", cfg.width, cfg.height, cfg.anchor));
 }
 
-// ---------------------------------------------------------------------------
-// CLI
-// ---------------------------------------------------------------------------
+// cli stuff
 
 fn get_pid(pidfile: &str) -> Option<i32> {
     std::fs::read_to_string(pidfile).ok()
@@ -821,7 +923,9 @@ fn cmd_config() {
     if dir.exists() {
         println!("{}", dir.display());
         if let Ok(entries) = std::fs::read_dir(&dir) {
-            for e in entries.flatten() { println!("  {}", e.file_name().to_string_lossy()); }
+            for e in entries.flatten() {
+                println!("  {}", e.file_name().to_string_lossy());
+            }
         }
     } else {
         println!("Config directory does not exist: {}", dir.display());
@@ -834,8 +938,12 @@ fn cmd_generate_config() {
     std::fs::create_dir_all(&dir).expect("failed to create config dir");
     for (name, content) in [("style.css", default_css()), ("config", default_config())] {
         let p = dir.join(name);
-        if p.exists() { println!("{} already exists at {}", name, p.display()); }
-        else { let _ = std::fs::write(&p, content); println!("Created {}", p.display()); }
+        if p.exists() {
+            println!("{} already exists at {}", name, p.display());
+        } else {
+            let _ = std::fs::write(&p, content);
+            println!("Created {}", p.display());
+        }
     }
     println!("Config directory: {}", dir.display());
 }
@@ -867,10 +975,15 @@ fn main() {
             "--config" => { cmd_config(); return; }
             "--generate-config" => { cmd_generate_config(); return; }
             "--reload" => { cmd_reload(&pidfile); return; }
-            other => { eprintln!("Unknown option: {}", other); print_usage(); std::process::exit(1); }
+            other => {
+                eprintln!("Unknown option: {}", other);
+                print_usage();
+                std::process::exit(1);
+            }
         }
     }
 
+    // toggle existing daemon or start new one
     if let Some(pid) = get_pid(&pidfile) {
         unsafe { libc::kill(pid, libc::SIGUSR1) };
         return;
@@ -886,14 +999,17 @@ fn main() {
     app.connect_activate(|app| {
         activate(app);
 
+        // sigusr1 = toggle window
         glib::unix_signal_add_local(libc::SIGUSR1, {
             let app = app.clone();
             move || {
                 let cfg = Config::load();
                 CONFIG.with(|c| *c.borrow_mut() = cfg.clone());
+
                 if let Some(win) = app.active_window() {
-                    if win.is_visible() { win.set_visible(false); }
-                    else {
+                    if win.is_visible() {
+                        win.set_visible(false);
+                    } else {
                         if cfg.anchor == Anchor::Cursor {
                             let (cx, cy) = get_cursor_position();
                             win.set_margin(Edge::Top, cy);
@@ -917,15 +1033,18 @@ fn main() {
             }
         });
 
+        // sigusr2 = hot reload css + config
         glib::unix_signal_add_local(libc::SIGUSR2, {
             move || {
                 let cfg = Config::load();
                 CONFIG.with(|c| *c.borrow_mut() = cfg.clone());
+
                 let provider = CssProvider::new();
                 provider.load_from_data(&load_css(&cfg));
                 gtk4::style_context_add_provider_for_display(
                     &gdk4::Display::default().expect("no display"),
-                    &provider, gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+                    &provider,
+                    gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
                 );
                 log("config + css reloaded");
                 glib::ControlFlow::Continue
