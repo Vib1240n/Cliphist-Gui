@@ -115,3 +115,22 @@ window {
   font-size: 10px;
   margin-left: 4px;
 }
+/* Vim mode indicator */
+.vim-mode-indicator {
+  font-family: monospace;
+  font-weight: bold;
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin-right: 12px;
+}
+
+.vim-mode-normal {
+  background: #7aa2f7;
+  color: #1a1b26;
+}
+
+.vim-mode-insert {
+  background: #9ece6a;
+  color: #1a1b26;
+}

@@ -7,6 +7,13 @@ pub enum Action {
     Next, Prev, PageDown, PageUp, First, Last,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VimMode {
+    #[default]
+    Normal,
+    Insert,
+}
+
 #[derive(Clone, Debug)]
 pub struct KeyCombo {
     pub key: gdk4::Key,
@@ -86,6 +93,11 @@ pub fn match_action(keybinds: &HashMap<Action, Vec<KeyCombo>>, key: gdk4::Key, m
     None
 }
 
+/// Get the character for a key press (for vim mode)
+pub fn key_to_char(key: gdk4::Key) -> Option<char> {
+    key.to_unicode().filter(|c| c.is_ascii_graphic())
+}
+
 pub fn default_keybinds() -> HashMap<Action, Vec<KeyCombo>> {
     let mut kb = HashMap::new();
     kb.insert(Action::Select, vec![
@@ -123,3 +135,4 @@ pub fn default_keybinds() -> HashMap<Action, Vec<KeyCombo>> {
     ]);
     kb
 }
+

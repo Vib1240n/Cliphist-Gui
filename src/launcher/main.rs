@@ -13,9 +13,9 @@ use std::rc::Rc;
 use std::io::Write;
 
 use common::{
-    Action, Anchor, ConfigBase,
+    Action, Anchor, ConfigBase, VimMode,
     config::{parse_bool, parse_config_file},
-    keys::match_action,
+    keys::{match_action, key_to_char},
     layer::{apply_layer_shell, update_cursor_position},
     logging::log,
     paths::config_dir,
@@ -32,6 +32,7 @@ struct Config {
     base: ConfigBase,
     terminal: String,
     calculator: bool,
+    vim_mode: bool,
 }
 
 impl Config {
@@ -40,6 +41,7 @@ impl Config {
             base: ConfigBase::new(APP_NAME, 580, 400),
             terminal: "kitty".to_string(),
             calculator: true,
+            vim_mode: false,
         }
     }
 
@@ -67,6 +69,7 @@ impl Config {
                 match key.as_str() {
                     "terminal" => cfg.terminal = val,
                     "calculator" => cfg.calculator = parse_bool(&val, true),
+                    "vim_mode" => cfg.vim_mode = parse_bool(&val, false),
                     _ => {}
                 }
             }
@@ -90,6 +93,7 @@ struct AppWidgets {
     search: Entry,
     listbox: ListBox,
     status: Label,
+    mode_label: Label,
     entries: Rc<RefCell<Vec<DesktopEntry>>>,
 }
 
@@ -97,6 +101,32 @@ thread_local! {
     static WIDGETS: RefCell<Option<AppWidgets>> = RefCell::new(None);
     static CONFIG: RefCell<Config> = RefCell::new(Config::default());
     static FREQUENCY: RefCell<HashMap<String, u32>> = RefCell::new(HashMap::new());
+    static VIM_STATE: RefCell<VimMode> = RefCell::new(VimMode::Normal);
+    static LAST_KEY: RefCell<Option<char>> = RefCell::new(None);
+}
+
+fn set_vim_mode(mode: VimMode) {
+    VIM_STATE.with(|s| *s.borrow_mut() = mode);
+    LAST_KEY.with(|k| *k.borrow_mut() = None);
+}
+
+fn get_vim_mode() -> VimMode {
+    VIM_STATE.with(|s| *s.borrow())
+}
+
+fn update_mode_display(label: &Label, mode: VimMode) {
+    match mode {
+        VimMode::Normal => {
+            label.set_text("NORMAL");
+            label.remove_css_class("vim-mode-insert");
+            label.add_css_class("vim-mode-normal");
+        }
+        VimMode::Insert => {
+            label.set_text("INSERT");
+            label.remove_css_class("vim-mode-normal");
+            label.add_css_class("vim-mode-insert");
+        }
+    }
 }
 
 fn xdg_data_dirs() -> Vec<PathBuf> {
@@ -161,7 +191,6 @@ fn parse_desktop_file(path: &PathBuf) -> Option<DesktopEntry> {
         return None;
     }
 
-    // clean exec - remove field codes
     let exec_clean = exec
         .replace("%f", "").replace("%F", "")
         .replace("%u", "").replace("%U", "")
@@ -220,14 +249,10 @@ fn fuzzy_match(query: &str, text: &str) -> Option<i32> {
     let q = query.to_lowercase();
     let t = text.to_lowercase();
     
-    // exact match
     if t == q { return Some(1000); }
-    // starts with
     if t.starts_with(&q) { return Some(500 + (100 - q.len() as i32)); }
-    // contains
     if t.contains(&q) { return Some(200); }
     
-    // fuzzy char match
     let mut qi = q.chars().peekable();
     let mut score = 0;
     let mut consecutive = 0;
@@ -259,7 +284,6 @@ fn filter_entries(entries: &[DesktopEntry], query: &str) -> Vec<DesktopEntry> {
         })
         .collect();
 
-    // add frequency bonus
     FREQUENCY.with(|f| {
         let freq = f.borrow();
         for (entry, score) in &mut matched {
@@ -274,15 +298,12 @@ fn filter_entries(entries: &[DesktopEntry], query: &str) -> Vec<DesktopEntry> {
 }
 
 fn calc_eval(expr: &str) -> Option<String> {
-    // let e = expr.trim();
     let e = expr.trim().trim_matches('=').to_lowercase();
     if e.is_empty() { return None; }
     
-    // let allowed = |c: char| c.is_ascii_digit() || "+-*/.^() ".contains(c);
     let allowed = |c: char| c.is_ascii_digit() || "+-*/.^() ".contains(c);
     if !e.chars().all(allowed) { return None; }
     
-    // Using bc -l for floating point math
     let mut child = Command::new("bc")
         .arg("-l")
         .env("BC_LINE_LENGTH", "0")
@@ -292,7 +313,6 @@ fn calc_eval(expr: &str) -> Option<String> {
         .spawn().ok()?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        // scale=4 ensures we don't get 20 trailing zeros from bc
         let query = format!("scale=4; {}\n", e);
         let _ = stdin.write_all(query.as_bytes());
     }
@@ -300,10 +320,9 @@ fn calc_eval(expr: &str) -> Option<String> {
     let output = child.wait_with_output().ok()?;
     if output.status.success() {
         let res = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        // Strip trailing zeros and potential trailing dot
-        if res.contains('.'){
-        let cleaned = res.trim_end_matches('0').trim_end_matches('.').to_string();
-        if cleaned.is_empty() || cleaned == "-" { return Some("0".to_string()); }
+        if res.contains('.') {
+            let cleaned = res.trim_end_matches('0').trim_end_matches('.').to_string();
+            if cleaned.is_empty() || cleaned == "-" { return Some("0".to_string()); }
             return Some(cleaned)
         }
         Some(res)
@@ -338,7 +357,6 @@ fn launch_app(entry: &DesktopEntry, terminal: &str) {
 fn load_icon(icon_name: &str, size: i32) -> Option<Image> {
     if icon_name.is_empty() { return None; }
 
-    // absolute path
     if icon_name.starts_with('/') {
         let p = PathBuf::from(icon_name);
         if p.exists() {
@@ -348,7 +366,6 @@ fn load_icon(icon_name: &str, size: i32) -> Option<Image> {
         }
     }
 
-    // theme icon
     let display = gdk4::Display::default()?;
     let theme = gtk4::IconTheme::for_display(&display);
     
@@ -368,7 +385,6 @@ fn build_row(entry: &DesktopEntry) -> ListBoxRow {
     let hbox = GtkBox::new(Orientation::Horizontal, 14);
     hbox.set_valign(Align::Center);
 
-    // icon
     let icon_box = GtkBox::new(Orientation::Vertical, 0);
     icon_box.set_size_request(48, 48);
     icon_box.set_valign(Align::Center);
@@ -388,7 +404,6 @@ fn build_row(entry: &DesktopEntry) -> ListBoxRow {
     }
     hbox.append(&icon_box);
 
-    // content
     let content = GtkBox::new(Orientation::Vertical, 0);
     content.set_hexpand(true);
     content.set_valign(Align::Center);
@@ -454,7 +469,6 @@ fn build_calc_row(expr: &str, result: &str) -> ListBoxRow {
 fn populate_list(listbox: &ListBox, entries: &[DesktopEntry], query: &str, calc_enabled: bool) -> usize {
     while let Some(row) = listbox.row_at_index(0) { listbox.remove(&row); }
 
-    // calculator mode
     if calc_enabled && query.starts_with('=') && query.len() > 1 {
         let expr = &query[1..];
         if let Some(result) = calc_eval(expr) {
@@ -462,7 +476,7 @@ fn populate_list(listbox: &ListBox, entries: &[DesktopEntry], query: &str, calc_
             if let Some(first) = listbox.row_at_index(0) {
                 listbox.select_row(Some(&first));
             }
-            return 1; // Only show the calculator result
+            return 1;
         }
     }
 
@@ -488,18 +502,35 @@ fn activate(app: &Application) {
     let cfg = Config::load();
     CONFIG.with(|c| *c.borrow_mut() = cfg.clone());
 
+    // Reset vim state on activation
+    if cfg.vim_mode {
+        set_vim_mode(VimMode::Normal);
+    }
+
     if let Some(win) = app.active_window() {
         if win.is_visible() {
             win.set_visible(false);
         } else {
             if cfg.base.anchor == Anchor::Cursor { update_cursor_position(&win); }
+            
+            // Reset to normal mode when showing
+            if cfg.vim_mode {
+                set_vim_mode(VimMode::Normal);
+            }
+            
             WIDGETS.with(|w| {
                 if let Some(ref wg) = *w.borrow() {
                     let ents = wg.entries.borrow();
                     let n = populate_list(&wg.listbox, &ents, "", cfg.calculator);
                     wg.status.set_text(&format!("{} apps", n));
                     wg.search.set_text("");
-                    wg.search.grab_focus();
+                    
+                    if cfg.vim_mode {
+                        update_mode_display(&wg.mode_label, VimMode::Normal);
+                        wg.listbox.grab_focus();
+                    } else {
+                        wg.search.grab_focus();
+                    }
                 }
             });
             win.set_visible(true);
@@ -509,15 +540,15 @@ fn activate(app: &Application) {
     }
 
     let css_content = if let Ok(theme) = std::env::var("GUI_THEME_OVERRIDE") {
-    common::paths::get_theme_css(&theme).unwrap_or_else(|| load_css(APP_NAME, &cfg.base.theme, default_css()))
-} else if !cfg.base.theme.contains('/') && !cfg.base.theme.ends_with(".css") {
-    common::paths::get_theme_css(&cfg.base.theme).unwrap_or_else(|| default_css().to_string())
-} else {
-    load_css(APP_NAME, &cfg.base.theme, default_css())
-};
+        common::paths::get_theme_css(&theme).unwrap_or_else(|| load_css(APP_NAME, &cfg.base.theme, default_css()))
+    } else if !cfg.base.theme.contains('/') && !cfg.base.theme.ends_with(".css") {
+        common::paths::get_theme_css(&cfg.base.theme).unwrap_or_else(|| default_css().to_string())
+    } else {
+        load_css(APP_NAME, &cfg.base.theme, default_css())
+    };
 
-let provider = CssProvider::new();
-provider.load_from_data(&css_content);
+    let provider = CssProvider::new();
+    provider.load_from_data(&css_content);
     gtk4::style_context_add_provider_for_display(
         &gdk4::Display::default().expect("no display"),
         &provider,
@@ -580,9 +611,23 @@ provider.load_from_data(&css_content);
     scroll.set_child(Some(&listbox));
     container.append(&scroll);
     let scroll_k = scroll.clone();
+
     // status bar
     let status_bar = GtkBox::new(Orientation::Horizontal, 0);
     status_bar.add_css_class("launch-status-bar");
+    
+    // Mode indicator (left side, before status)
+    let mode_label = Label::new(Some(""));
+    mode_label.add_css_class("vim-mode-indicator");
+    mode_label.set_halign(Align::Start);
+    if cfg.vim_mode {
+        update_mode_display(&mode_label, VimMode::Normal);
+        mode_label.set_visible(true);
+    } else {
+        mode_label.set_visible(false);
+    }
+    status_bar.append(&mode_label);
+    
     let status = Label::new(Some("0 apps"));
     status.add_css_class("launch-status-left");
     status.set_halign(Align::Start);
@@ -591,15 +636,29 @@ provider.load_from_data(&css_content);
 
     let hints = GtkBox::new(Orientation::Horizontal, 12);
     hints.set_halign(Align::End);
-    for (k, h) in [("Enter", "launch"), ("=", "calc")] {
-        let b = GtkBox::new(Orientation::Horizontal, 0);
-        let kl = Label::new(Some(k));
-        kl.add_css_class("launch-status-key");
-        b.append(&kl);
-        let hl = Label::new(Some(h));
-        hl.add_css_class("launch-status-hint");
-        b.append(&hl);
-        hints.append(&b);
+    
+    if cfg.vim_mode {
+        for (k, h) in [("i", "insert"), ("j/k", "nav"), ("Enter", "launch")] {
+            let b = GtkBox::new(Orientation::Horizontal, 0);
+            let kl = Label::new(Some(k));
+            kl.add_css_class("launch-status-key");
+            b.append(&kl);
+            let hl = Label::new(Some(h));
+            hl.add_css_class("launch-status-hint");
+            b.append(&hl);
+            hints.append(&b);
+        }
+    } else {
+        for (k, h) in [("Enter", "launch"), ("=", "calc")] {
+            let b = GtkBox::new(Orientation::Horizontal, 0);
+            let kl = Label::new(Some(k));
+            kl.add_css_class("launch-status-key");
+            b.append(&kl);
+            let hl = Label::new(Some(h));
+            hl.add_css_class("launch-status-hint");
+            b.append(&hl);
+            hints.append(&b);
+        }
     }
     status_bar.append(&hints);
     container.append(&status_bar);
@@ -628,77 +687,263 @@ provider.load_from_data(&css_content);
     let lk = listbox.clone();
     let wk = window.clone();
     let sk = search.clone();
+    let mode_k = mode_label.clone();
 
     key_ctrl.connect_key_pressed(move |_, key, _, mods| {
-        let action = CONFIG.with(|c| match_action(&c.borrow().base.keybinds, key, mods));
+        let vim_enabled = CONFIG.with(|c| c.borrow().vim_mode);
         let terminal = CONFIG.with(|c| c.borrow().terminal.clone());
         let calc = CONFIG.with(|c| c.borrow().calculator);
 
-        if let Some(action) = action {
-            match action {
-                Action::Close => { wk.set_visible(false); }
-                Action::Select => {
-                    let q = sk.text().to_string();
-                    
-                    // calc mode - copy result
-                    if calc && q.starts_with('=') {
-        if let Some(result) = calc_eval(&q[1..]) {
-            // Use wl-copy for Wayland/Hyprland
-            let _ = Command::new("sh")
-                .arg("-c")
-                .arg(format!("echo -n '{}' | wl-copy", result))
-                .spawn();
+        if vim_enabled {
+            let current_mode = get_vim_mode();
+            let key_char = key_to_char(key);
             
-            log(APP_NAME, &format!("copied math result: {}", result));
-            wk.set_visible(false);
-            return glib::Propagation::Stop;
-        }
-    }                    
-                    if let Some(row) = lk.selected_row() {
-                        let ents = ek.borrow();
-                        if let Some(e) = get_filtered_entry(&ents, &q, row.index() as usize) {
-                            launch_app(&e, &terminal);
-                            wk.set_visible(false);
+            match current_mode {
+                VimMode::Normal => {
+                    // Escape in normal mode -> close
+                    if key == gdk4::Key::Escape {
+                        wk.set_visible(false);
+                        return glib::Propagation::Stop;
+                    }
+                    
+                    // Enter -> select
+                    if key == gdk4::Key::Return {
+                        let q = sk.text().to_string();
+                        if let Some(row) = lk.selected_row() {
+                            let ents = ek.borrow();
+                            if let Some(e) = get_filtered_entry(&ents, &q, row.index() as usize) {
+                                launch_app(&e, &terminal);
+                                wk.set_visible(false);
+                            }
+                        }
+                        return glib::Propagation::Stop;
+                    }
+                    
+                    // Check for vim keys
+                    if let Some(c) = key_char {
+                        match c {
+                            'i' | 'a' | 'A' | 'I' | '/' => {
+                                set_vim_mode(VimMode::Insert);
+                                update_mode_display(&mode_k, VimMode::Insert);
+                                sk.grab_focus();
+                                if c == 'A' || c == 'a' {
+                                    sk.set_position(-1); // end
+                                } else if c == 'I' {
+                                    sk.set_position(0); // start
+                                }
+                                return glib::Propagation::Stop;
+                            }
+                            'j' => {
+                                if let Some(r) = lk.selected_row() {
+                                    if let Some(n) = lk.row_at_index(r.index() + 1) {
+                                        lk.select_row(Some(&n));
+                                        common::css::scroll_to_selected(&lk, &scroll_k);
+                                    }
+                                }
+                                LAST_KEY.with(|k| *k.borrow_mut() = None);
+                                return glib::Propagation::Stop;
+                            }
+                            'k' => {
+                                if let Some(r) = lk.selected_row() {
+                                    if r.index() > 0 {
+                                        if let Some(p) = lk.row_at_index(r.index() - 1) {
+                                            lk.select_row(Some(&p));
+                                            common::css::scroll_to_selected(&lk, &scroll_k);
+                                        }
+                                    }
+                                }
+                                LAST_KEY.with(|k| *k.borrow_mut() = None);
+                                return glib::Propagation::Stop;
+                            }
+                            'g' => {
+                                let last = LAST_KEY.with(|k| *k.borrow());
+                                if last == Some('g') {
+                                    // gg -> first
+                                    if let Some(r) = lk.row_at_index(0) {
+                                        lk.select_row(Some(&r));
+                                        common::css::scroll_to_selected(&lk, &scroll_k);
+                                    }
+                                    LAST_KEY.with(|k| *k.borrow_mut() = None);
+                                } else {
+                                    LAST_KEY.with(|k| *k.borrow_mut() = Some('g'));
+                                }
+                                return glib::Propagation::Stop;
+                            }
+                            'G' => {
+                                let n = lk.observe_children().n_items();
+                                if n > 0 {
+                                    if let Some(r) = lk.row_at_index(n as i32 - 1) {
+                                        lk.select_row(Some(&r));
+                                        common::css::scroll_to_selected(&lk, &scroll_k);
+                                    }
+                                }
+                                LAST_KEY.with(|k| *k.borrow_mut() = None);
+                                return glib::Propagation::Stop;
+                            }
+                            _ => {
+                                LAST_KEY.with(|k| *k.borrow_mut() = None);
+                            }
                         }
                     }
-                }
-                Action::ClearSearch => { sk.set_text(""); }
-                Action::Next => {
-                    if let Some(r) = lk.selected_row() {
-                        if let Some(n) = lk.row_at_index(r.index() + 1) { lk.select_row(Some(&n)); common::css::scroll_to_selected(&lk, &scroll_k);}
-                    }
-                }
-                Action::Prev => {
-                    if let Some(r) = lk.selected_row() {
-                        if r.index() > 0 {
-                            if let Some(p) = lk.row_at_index(r.index() - 1) { lk.select_row(Some(&p)); common::css::scroll_to_selected(&lk, &scroll_k);}
+                    
+                    // Ctrl+d / Ctrl+u for half page
+                    if mods.contains(gdk4::ModifierType::CONTROL_MASK) {
+                        if let Some(c) = key_char {
+                            match c {
+                                'd' => {
+                                    if let Some(r) = lk.selected_row() {
+                                        let t = (r.index() + 10).min(lk.observe_children().n_items() as i32 - 1);
+                                        if let Some(nr) = lk.row_at_index(t) {
+                                            lk.select_row(Some(&nr));
+                                            common::css::scroll_to_selected(&lk, &scroll_k);
+                                        }
+                                    }
+                                    return glib::Propagation::Stop;
+                                }
+                                'u' => {
+                                    if let Some(r) = lk.selected_row() {
+                                        let t = (r.index() - 10).max(0);
+                                        if let Some(nr) = lk.row_at_index(t) {
+                                            lk.select_row(Some(&nr));
+                                            common::css::scroll_to_selected(&lk, &scroll_k);
+                                        }
+                                    }
+                                    return glib::Propagation::Stop;
+                                }
+                                _ => {}
+                            }
                         }
                     }
+                    
+                    // Block other keys in normal mode
+                    return glib::Propagation::Stop;
                 }
-                Action::PageDown => {
-                    if let Some(r) = lk.selected_row() {
-                        let t = (r.index() + 10).min(lk.observe_children().n_items() as i32 - 1);
-                        if let Some(nr) = lk.row_at_index(t) { lk.select_row(Some(&nr)); common::css::scroll_to_selected(&lk, &scroll_k);}
+                VimMode::Insert => {
+                    // Escape in insert mode -> normal mode (not close)
+                    if key == gdk4::Key::Escape {
+                        set_vim_mode(VimMode::Normal);
+                        update_mode_display(&mode_k, VimMode::Normal);
+                        lk.grab_focus();
+                        return glib::Propagation::Stop;
                     }
-                }
-                Action::PageUp => {
-                    if let Some(r) = lk.selected_row() {
-                        let t = (r.index() - 10).max(0);
-                        if let Some(nr) = lk.row_at_index(t) { lk.select_row(Some(&nr)); common::css::scroll_to_selected(&lk, &scroll_k);}
+                    
+                    // Enter in insert mode -> select (same as normal)
+                    if key == gdk4::Key::Return {
+                        let q = sk.text().to_string();
+                        
+                        // calc mode
+                        if calc && q.starts_with('=') {
+                            if let Some(result) = calc_eval(&q[1..]) {
+                                let _ = Command::new("sh")
+                                    .arg("-c")
+                                    .arg(format!("echo -n '{}' | wl-copy", result))
+                                    .spawn();
+                                log(APP_NAME, &format!("copied math result: {}", result));
+                                wk.set_visible(false);
+                                return glib::Propagation::Stop;
+                            }
+                        }
+                        
+                        if let Some(row) = lk.selected_row() {
+                            let ents = ek.borrow();
+                            if let Some(e) = get_filtered_entry(&ents, &q, row.index() as usize) {
+                                launch_app(&e, &terminal);
+                                wk.set_visible(false);
+                            }
+                        }
+                        return glib::Propagation::Stop;
                     }
+                    
+                    // Let other keys pass through to Entry
+                    return glib::Propagation::Proceed;
                 }
-                Action::First => {
-                    if let Some(r) = lk.row_at_index(0) { lk.select_row(Some(&r)); common::css::scroll_to_selected(&lk, &scroll_k);}
-                }
-                Action::Last => {
-                    let n = lk.observe_children().n_items();
-                    if n > 0 {
-                        if let Some(r) = lk.row_at_index(n as i32 - 1) { lk.select_row(Some(&r)); common::css::scroll_to_selected(&lk, &scroll_k);}
-                    }
-                }
-                _ => {}
             }
-            return glib::Propagation::Stop;
+        } else {
+            // Non-vim mode: original behavior
+            let action = CONFIG.with(|c| match_action(&c.borrow().base.keybinds, key, mods));
+
+            if let Some(action) = action {
+                match action {
+                    Action::Close => { wk.set_visible(false); }
+                    Action::Select => {
+                        let q = sk.text().to_string();
+                        
+                        if calc && q.starts_with('=') {
+                            if let Some(result) = calc_eval(&q[1..]) {
+                                let _ = Command::new("sh")
+                                    .arg("-c")
+                                    .arg(format!("echo -n '{}' | wl-copy", result))
+                                    .spawn();
+                                log(APP_NAME, &format!("copied math result: {}", result));
+                                wk.set_visible(false);
+                                return glib::Propagation::Stop;
+                            }
+                        }
+                        
+                        if let Some(row) = lk.selected_row() {
+                            let ents = ek.borrow();
+                            if let Some(e) = get_filtered_entry(&ents, &q, row.index() as usize) {
+                                launch_app(&e, &terminal);
+                                wk.set_visible(false);
+                            }
+                        }
+                    }
+                    Action::ClearSearch => { sk.set_text(""); }
+                    Action::Next => {
+                        if let Some(r) = lk.selected_row() {
+                            if let Some(n) = lk.row_at_index(r.index() + 1) {
+                                lk.select_row(Some(&n));
+                                common::css::scroll_to_selected(&lk, &scroll_k);
+                            }
+                        }
+                    }
+                    Action::Prev => {
+                        if let Some(r) = lk.selected_row() {
+                            if r.index() > 0 {
+                                if let Some(p) = lk.row_at_index(r.index() - 1) {
+                                    lk.select_row(Some(&p));
+                                    common::css::scroll_to_selected(&lk, &scroll_k);
+                                }
+                            }
+                        }
+                    }
+                    Action::PageDown => {
+                        if let Some(r) = lk.selected_row() {
+                            let t = (r.index() + 10).min(lk.observe_children().n_items() as i32 - 1);
+                            if let Some(nr) = lk.row_at_index(t) {
+                                lk.select_row(Some(&nr));
+                                common::css::scroll_to_selected(&lk, &scroll_k);
+                            }
+                        }
+                    }
+                    Action::PageUp => {
+                        if let Some(r) = lk.selected_row() {
+                            let t = (r.index() - 10).max(0);
+                            if let Some(nr) = lk.row_at_index(t) {
+                                lk.select_row(Some(&nr));
+                                common::css::scroll_to_selected(&lk, &scroll_k);
+                            }
+                        }
+                    }
+                    Action::First => {
+                        if let Some(r) = lk.row_at_index(0) {
+                            lk.select_row(Some(&r));
+                            common::css::scroll_to_selected(&lk, &scroll_k);
+                        }
+                    }
+                    Action::Last => {
+                        let n = lk.observe_children().n_items();
+                        if n > 0 {
+                            if let Some(r) = lk.row_at_index(n as i32 - 1) {
+                                lk.select_row(Some(&r));
+                                common::css::scroll_to_selected(&lk, &scroll_k);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                return glib::Propagation::Stop;
+            }
         }
         glib::Propagation::Proceed
     });
@@ -729,8 +974,11 @@ provider.load_from_data(&css_content);
 
     WIDGETS.with(|w| {
         *w.borrow_mut() = Some(AppWidgets {
-            search: search.clone(), listbox: listbox.clone(),
-            status: status.clone(), entries: entries.clone(),
+            search: search.clone(),
+            listbox: listbox.clone(),
+            status: status.clone(),
+            mode_label: mode_label.clone(),
+            entries: entries.clone(),
         });
     });
 
@@ -743,8 +991,16 @@ provider.load_from_data(&css_content);
     }
 
     window.present();
-    search.grab_focus();
-    log(APP_NAME, &format!("daemon started ({}x{}, anchor={:?})", cfg.base.width, cfg.base.height, cfg.base.anchor));
+    
+    // Focus based on vim mode
+    if cfg.vim_mode {
+        listbox.grab_focus();
+    } else {
+        search.grab_focus();
+    }
+    
+    log(APP_NAME, &format!("daemon started ({}x{}, anchor={:?}, vim={})", 
+        cfg.base.width, cfg.base.height, cfg.base.anchor, cfg.vim_mode));
 }
 
 fn get_pid(pidfile: &str) -> Option<i32> {
@@ -754,7 +1010,7 @@ fn get_pid(pidfile: &str) -> Option<i32> {
 }
 
 fn print_usage() {
-    eprintln!("{} - {}\n", APP_NAME, "app launcher"); // or "clipboard manager"
+    eprintln!("{} - {}\n", APP_NAME, "app launcher");
     eprintln!("Usage:");
     eprintln!("  {}                      Start daemon", APP_NAME);
     eprintln!("  {} toggle               Toggle window", APP_NAME);
@@ -818,72 +1074,72 @@ fn main() {
     let pidfile = format!("/tmp/{}-{}.pid", APP_NAME, unsafe { libc::getuid() });
 
     if args.len() > 1 {
-    match args[1].as_str() {
-        "--help" | "-h" => { print_usage(); return; }
-        "--config" => { cmd_config(); return; }
-        "--generate-config" => { cmd_generate_config(); return; }
-        "--reload" => { cmd_reload(&pidfile); return; }
-        "toggle" => {
-            if let Some(pid) = get_pid(&pidfile) {
-                unsafe { libc::kill(pid, libc::SIGUSR1) };
-            } else {
-                eprintln!("Daemon not running");
+        match args[1].as_str() {
+            "--help" | "-h" => { print_usage(); return; }
+            "--config" => { cmd_config(); return; }
+            "--generate-config" => { cmd_generate_config(); return; }
+            "--reload" => { cmd_reload(&pidfile); return; }
+            "toggle" => {
+                if let Some(pid) = get_pid(&pidfile) {
+                    unsafe { libc::kill(pid, libc::SIGUSR1) };
+                } else {
+                    eprintln!("Daemon not running");
+                }
+                return;
             }
-            return;
-        }
-        "open" => {
-            if let Some(pid) = get_pid(&pidfile) {
-                unsafe { libc::kill(pid, libc::SIGUSR1) };
-            } else {
-                eprintln!("Daemon not running");
+            "open" => {
+                if let Some(pid) = get_pid(&pidfile) {
+                    unsafe { libc::kill(pid, libc::SIGUSR1) };
+                } else {
+                    eprintln!("Daemon not running");
+                }
+                return;
             }
-            return;
-        }
-        "close" => {
-            if let Some(pid) = get_pid(&pidfile) {
-                unsafe { libc::kill(pid, libc::SIGTERM) };
+            "close" => {
+                if let Some(pid) = get_pid(&pidfile) {
+                    unsafe { libc::kill(pid, libc::SIGTERM) };
+                }
+                return;
             }
-            return;
-        }
             "show-themes" | "--themes" => {
-    println!("Available themes:");
-    for (name, _) in common::paths::builtin_themes() {
-        println!("  {}", name);
-    }
-    return;
-}
-"-T" | "--theme" => {
-    if args.len() < 3 {
-        eprintln!("Usage: {} --theme <name>", APP_NAME);
-        return;
-    }
-    let theme = &args[2];
-    if common::paths::get_theme_css(theme).is_none() {
-        eprintln!("Unknown theme: {}", theme);
-        return;
-    }
-    // Kill existing
-    if let Some(pid) = get_pid(&pidfile) {
-        unsafe { libc::kill(pid, libc::SIGTERM) };
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let _ = std::fs::remove_file(&pidfile);
-    }
-    // Start new daemon with theme
-    let exe = std::env::current_exe().expect("cannot find self");
-    let _ = Command::new(&exe)
-        .env("GUI_THEME_OVERRIDE", theme)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-    println!("Started with theme: {}", theme);
-    return;
-}        other => {
-            eprintln!("Unknown option: {}", other);
-            print_usage();
-            std::process::exit(1);
+                println!("Available themes:");
+                for (name, _) in common::paths::builtin_themes() {
+                    println!("  {}", name);
+                }
+                return;
+            }
+            "-T" | "--theme" => {
+                if args.len() < 3 {
+                    eprintln!("Usage: {} --theme <name>", APP_NAME);
+                    return;
+                }
+                let theme = &args[2];
+                if common::paths::get_theme_css(theme).is_none() {
+                    eprintln!("Unknown theme: {}", theme);
+                    return;
+                }
+                if let Some(pid) = get_pid(&pidfile) {
+                    unsafe { libc::kill(pid, libc::SIGTERM) };
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    let _ = std::fs::remove_file(&pidfile);
+                }
+                let exe = std::env::current_exe().expect("cannot find self");
+                let _ = Command::new(&exe)
+                    .env("GUI_THEME_OVERRIDE", theme)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+                println!("Started with theme: {}", theme);
+                return;
+            }
+            other => {
+                eprintln!("Unknown option: {}", other);
+                print_usage();
+                std::process::exit(1);
+            }
         }
     }
-}
+
     if let Some(pid) = get_pid(&pidfile) {
         unsafe { libc::kill(pid, libc::SIGUSR1) };
         return;
@@ -910,13 +1166,25 @@ fn main() {
                         win.set_visible(false);
                     } else {
                         if cfg.base.anchor == Anchor::Cursor { update_cursor_position(&win); }
+                        
+                        // Reset to normal mode when showing
+                        if cfg.vim_mode {
+                            set_vim_mode(VimMode::Normal);
+                        }
+                        
                         WIDGETS.with(|w| {
                             if let Some(ref wg) = *w.borrow() {
                                 let ents = wg.entries.borrow();
                                 let n = populate_list(&wg.listbox, &ents, "", cfg.calculator);
                                 wg.status.set_text(&format!("{} apps", n));
                                 wg.search.set_text("");
-                                wg.search.grab_focus();
+                                
+                                if cfg.vim_mode {
+                                    update_mode_display(&wg.mode_label, VimMode::Normal);
+                                    wg.listbox.grab_focus();
+                                } else {
+                                    wg.search.grab_focus();
+                                }
                             }
                         });
                         win.set_visible(true);
@@ -948,3 +1216,4 @@ fn main() {
     app.run_with_args::<String>(&[]);
     let _ = std::fs::remove_file(&pidfile);
 }
+

@@ -15,10 +15,9 @@ margin_right = 0
 theme = ~/.config/launch-gui/style.css
 
 [behavior]
-# Terminal emulator for Terminal=true apps
 terminal = kitty
-# Show calculator results inline (prefix with =)
 calculator = true
+vim_mode = false
 
 [keybinds]
 select = Return Enter
