@@ -1,0 +1,131 @@
+window {
+  background-color: transparent;
+}
+.launch-container,
+.clip-container {
+  background-color: alpha(#131318, 0.94);
+  border-radius: 32px;
+  border: 1px solid alpha(#c3c7cf, 0.1);
+}
+.launch-header,
+.clip-header {
+  padding: 24px 28px 8px 28px;
+}
+.launch-search-row,
+.clip-search-row {
+  margin-bottom: 8px;
+}
+.launch-search,
+.clip-search {
+  background-color: alpha(#1d1b20, 0.9);
+  border: none;
+  border-radius: 32px;
+  padding: 14px 20px;
+  color: #e3e2e6;
+  font-size: 16px;
+  min-height: 24px;
+}
+.launch-search:focus,
+.clip-search:focus {
+  background-color: alpha(#2d2b30, 0.9);
+}
+.launch-esc-badge,
+.clip-esc-badge {
+  background-color: alpha(#48464c, 0.5);
+  border-radius: 12px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #c9c5ca;
+}
+.launch-hint-text,
+.clip-hint-text {
+  color: alpha(#c9c5ca, 0.7);
+  font-size: 12px;
+}
+.launch-section-label,
+.clip-section-label {
+  color: #8ab4f8;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 12px 4px 8px 4px;
+}
+.launch-list,
+.clip-list {
+  background-color: transparent;
+}
+.launch-list row,
+.clip-list row {
+  background-color: transparent;
+  border-radius: 20px;
+  margin: 3px 12px;
+  padding: 14px 18px;
+}
+.launch-list row:hover,
+.clip-list row:hover {
+  background-color: alpha(#8ab4f8, 0.06);
+}
+.launch-list row:selected,
+.clip-list row:selected {
+  background-color: alpha(#8ab4f8, 0.14);
+}
+.launch-icon-box,
+.clip-text-icon,
+.clip-thumb-frame {
+  background-color: alpha(#2d2b30, 0.8);
+  border-radius: 16px;
+  min-width: 52px;
+  min-height: 52px;
+}
+.launch-icon-fallback,
+.clip-text-icon-label {
+  color: #8ab4f8;
+  font-size: 22px;
+  font-weight: 500;
+}
+.launch-title,
+.clip-title {
+  color: #e3e2e6;
+  font-size: 15px;
+  font-weight: 500;
+}
+.launch-subtitle,
+.clip-subtitle {
+  color: #c9c5ca;
+  font-size: 12px;
+  margin-top: 2px;
+}
+.launch-calc-result {
+  color: #8ab4f8;
+  font-size: 20px;
+}
+.clip-badge {
+  color: #c9c5ca;
+  font-size: 11px;
+  font-weight: 500;
+}
+.launch-status-bar,
+.clip-status-bar {
+  padding: 14px 28px;
+  border-top: 1px solid alpha(#c3c7cf, 0.08);
+}
+.launch-status-left,
+.clip-status-left {
+  color: #c9c5ca;
+  font-size: 12px;
+}
+.launch-status-key,
+.clip-status-key {
+  background-color: alpha(#48464c, 0.5);
+  border-radius: 10px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #c9c5ca;
+}
+.launch-status-hint,
+.clip-status-hint {
+  color: #c9c5ca;
+  font-size: 11px;
+  margin-left: 6px;
+}

@@ -508,8 +508,16 @@ fn activate(app: &Application) {
         return;
     }
 
-    let provider = CssProvider::new();
-    provider.load_from_data(&load_css(APP_NAME, &cfg.base.theme, default_css()));
+    let css_content = if let Ok(theme) = std::env::var("GUI_THEME_OVERRIDE") {
+    common::paths::get_theme_css(&theme).unwrap_or_else(|| load_css(APP_NAME, &cfg.base.theme, default_css()))
+} else if !cfg.base.theme.contains('/') && !cfg.base.theme.ends_with(".css") {
+    common::paths::get_theme_css(&cfg.base.theme).unwrap_or_else(|| default_css().to_string())
+} else {
+    load_css(APP_NAME, &cfg.base.theme, default_css())
+};
+
+let provider = CssProvider::new();
+provider.load_from_data(&css_content);
     gtk4::style_context_add_provider_for_display(
         &gdk4::Display::default().expect("no display"),
         &provider,
@@ -571,7 +579,7 @@ fn activate(app: &Application) {
     listbox.set_selection_mode(gtk4::SelectionMode::Single);
     scroll.set_child(Some(&listbox));
     container.append(&scroll);
-
+    let scroll_k = scroll.clone();
     // status bar
     let status_bar = GtkBox::new(Orientation::Horizontal, 0);
     status_bar.add_css_class("launch-status-bar");
@@ -657,35 +665,35 @@ fn activate(app: &Application) {
                 Action::ClearSearch => { sk.set_text(""); }
                 Action::Next => {
                     if let Some(r) = lk.selected_row() {
-                        if let Some(n) = lk.row_at_index(r.index() + 1) { lk.select_row(Some(&n)); common::css::scroll_to_selected(&lk);}
+                        if let Some(n) = lk.row_at_index(r.index() + 1) { lk.select_row(Some(&n)); common::css::scroll_to_selected(&lk, &scroll_k);}
                     }
                 }
                 Action::Prev => {
                     if let Some(r) = lk.selected_row() {
                         if r.index() > 0 {
-                            if let Some(p) = lk.row_at_index(r.index() - 1) { lk.select_row(Some(&p)); common::css::scroll_to_selected(&lk);}
+                            if let Some(p) = lk.row_at_index(r.index() - 1) { lk.select_row(Some(&p)); common::css::scroll_to_selected(&lk, &scroll_k);}
                         }
                     }
                 }
                 Action::PageDown => {
                     if let Some(r) = lk.selected_row() {
                         let t = (r.index() + 10).min(lk.observe_children().n_items() as i32 - 1);
-                        if let Some(nr) = lk.row_at_index(t) { lk.select_row(Some(&nr)); common::css::scroll_to_selected(&lk);}
+                        if let Some(nr) = lk.row_at_index(t) { lk.select_row(Some(&nr)); common::css::scroll_to_selected(&lk, &scroll_k);}
                     }
                 }
                 Action::PageUp => {
                     if let Some(r) = lk.selected_row() {
                         let t = (r.index() - 10).max(0);
-                        if let Some(nr) = lk.row_at_index(t) { lk.select_row(Some(&nr)); common::css::scroll_to_selected(&lk);}
+                        if let Some(nr) = lk.row_at_index(t) { lk.select_row(Some(&nr)); common::css::scroll_to_selected(&lk, &scroll_k);}
                     }
                 }
                 Action::First => {
-                    if let Some(r) = lk.row_at_index(0) { lk.select_row(Some(&r)); common::css::scroll_to_selected(&lk);}
+                    if let Some(r) = lk.row_at_index(0) { lk.select_row(Some(&r)); common::css::scroll_to_selected(&lk, &scroll_k);}
                 }
                 Action::Last => {
                     let n = lk.observe_children().n_items();
                     if n > 0 {
-                        if let Some(r) = lk.row_at_index(n as i32 - 1) { lk.select_row(Some(&r)); common::css::scroll_to_selected(&lk);}
+                        if let Some(r) = lk.row_at_index(n as i32 - 1) { lk.select_row(Some(&r)); common::css::scroll_to_selected(&lk, &scroll_k);}
                     }
                 }
                 _ => {}
@@ -746,13 +754,16 @@ fn get_pid(pidfile: &str) -> Option<i32> {
 }
 
 fn print_usage() {
-    eprintln!("launch-gui - app launcher\n");
+    eprintln!("{} - {}\n", APP_NAME, "app launcher"); // or "clipboard manager"
     eprintln!("Usage:");
-    eprintln!("  launch-gui                    Launch daemon or toggle visibility");
-    eprintln!("  launch-gui --config           Show config directory and files");
-    eprintln!("  launch-gui --generate-config  Create config dir with defaults");
-    eprintln!("  launch-gui --reload           Reload config and restart");
-    eprintln!("  launch-gui --help             Show this help");
+    eprintln!("  {}                      Start daemon", APP_NAME);
+    eprintln!("  {} toggle               Toggle window", APP_NAME);
+    eprintln!("  {} --theme <name>       Preview theme", APP_NAME);
+    eprintln!("  {} show-themes          List themes", APP_NAME);
+    eprintln!("  {} --config             Show config dir", APP_NAME);
+    eprintln!("  {} --generate-config    Create defaults", APP_NAME);
+    eprintln!("  {} --reload             Restart daemon", APP_NAME);
+    eprintln!("  {} --help               Show help", APP_NAME);
 }
 
 fn cmd_config() {
@@ -807,19 +818,72 @@ fn main() {
     let pidfile = format!("/tmp/{}-{}.pid", APP_NAME, unsafe { libc::getuid() });
 
     if args.len() > 1 {
-        match args[1].as_str() {
-            "--help" | "-h" => { print_usage(); return; }
-            "--config" => { cmd_config(); return; }
-            "--generate-config" => { cmd_generate_config(); return; }
-            "--reload" => { cmd_reload(&pidfile); return; }
-            other => {
-                eprintln!("Unknown option: {}", other);
-                print_usage();
-                std::process::exit(1);
+    match args[1].as_str() {
+        "--help" | "-h" => { print_usage(); return; }
+        "--config" => { cmd_config(); return; }
+        "--generate-config" => { cmd_generate_config(); return; }
+        "--reload" => { cmd_reload(&pidfile); return; }
+        "toggle" => {
+            if let Some(pid) = get_pid(&pidfile) {
+                unsafe { libc::kill(pid, libc::SIGUSR1) };
+            } else {
+                eprintln!("Daemon not running");
             }
+            return;
+        }
+        "open" => {
+            if let Some(pid) = get_pid(&pidfile) {
+                unsafe { libc::kill(pid, libc::SIGUSR1) };
+            } else {
+                eprintln!("Daemon not running");
+            }
+            return;
+        }
+        "close" => {
+            if let Some(pid) = get_pid(&pidfile) {
+                unsafe { libc::kill(pid, libc::SIGTERM) };
+            }
+            return;
+        }
+            "show-themes" | "--themes" => {
+    println!("Available themes:");
+    for (name, _) in common::paths::builtin_themes() {
+        println!("  {}", name);
+    }
+    return;
+}
+"-T" | "--theme" => {
+    if args.len() < 3 {
+        eprintln!("Usage: {} --theme <name>", APP_NAME);
+        return;
+    }
+    let theme = &args[2];
+    if common::paths::get_theme_css(theme).is_none() {
+        eprintln!("Unknown theme: {}", theme);
+        return;
+    }
+    // Kill existing
+    if let Some(pid) = get_pid(&pidfile) {
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let _ = std::fs::remove_file(&pidfile);
+    }
+    // Start new daemon with theme
+    let exe = std::env::current_exe().expect("cannot find self");
+    let _ = Command::new(&exe)
+        .env("GUI_THEME_OVERRIDE", theme)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    println!("Started with theme: {}", theme);
+    return;
+}        other => {
+            eprintln!("Unknown option: {}", other);
+            print_usage();
+            std::process::exit(1);
         }
     }
-
+}
     if let Some(pid) = get_pid(&pidfile) {
         unsafe { libc::kill(pid, libc::SIGUSR1) };
         return;
