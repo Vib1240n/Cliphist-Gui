@@ -36,7 +36,7 @@ pub struct AppWidgets {
 }
 
 thread_local! {
-    pub static WIDGETS: RefCell<Option<AppWidgets>> = RefCell::new(None);
+    pub static WIDGETS: RefCell<Option<AppWidgets>> = const { RefCell::new(None) };
     pub static CONFIG: RefCell<Config> = RefCell::new(Config::default());
 }
 
@@ -331,19 +331,13 @@ pub fn activate(app: &Application) {
                     return glib::Propagation::Stop;
                 }
                 VimMode::Insert => {
-                    if let Some(action) = handle_vim_insert_key(key) {
-                        match action {
-                            VimAction::ExitInsert => {
-                                set_vim_mode(VimMode::Normal);
-                                update_mode_display(&mode_k, VimMode::Normal);
-                                lk.grab_focus();
-                            }
-                            _ => {}
+ if let Some(action) = handle_vim_insert_key(key) {
+                        if action == VimAction::ExitInsert {
+                            set_vim_mode(VimMode::Normal);
+                            update_mode_display(&mode_k, VimMode::Normal);
+                            lk.grab_focus();
                         }
-                        return glib::Propagation::Stop;
-                    }
-
-                    // Enter in insert mode -> select
+                    }                    // Enter in insert mode -> select
                     if key == gdk4::Key::Return {
                         let q = sk.text().to_string();
 

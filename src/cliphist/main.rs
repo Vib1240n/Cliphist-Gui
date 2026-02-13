@@ -3,7 +3,6 @@ mod config;
 mod entries;
 mod ui;
 
-use gio;
 use gtk4::prelude::*;
 use gtk4::Application;
 use std::process::Command;

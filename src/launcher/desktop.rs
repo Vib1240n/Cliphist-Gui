@@ -12,6 +12,7 @@ thread_local! {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct DesktopEntry {
     pub name: String,
     pub exec: String,

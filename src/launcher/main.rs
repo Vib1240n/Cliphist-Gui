@@ -5,7 +5,6 @@ mod desktop;
 mod search;
 mod ui;
 
-use gio;
 use gtk4::prelude::*;
 use gtk4::Application;
 use std::process::Command;

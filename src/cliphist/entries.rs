@@ -1,13 +1,14 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
-
+use std::path::Path;
 use crate::config::APP_NAME;
 use common::css::char_truncate;
 
 const THUMB_SIZE: u32 = 64;
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct ClipEntry {
     pub raw_line: String,
     pub id: String,
@@ -68,7 +69,7 @@ pub fn fetch_entries(max_items: usize) -> Vec<ClipEntry> {
     .collect()
 }
 
-pub fn generate_thumbnail(raw_line: &str, out_path: &PathBuf) {
+pub fn generate_thumbnail(raw_line: &str, out_path: &Path) {
     let mut child = match Command::new("cliphist")
         .arg("decode")
         .stdin(std::process::Stdio::piped())
