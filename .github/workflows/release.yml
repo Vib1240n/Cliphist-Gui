@@ -11,17 +11,26 @@ env:
 jobs:
   build:
     name: Build Release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install GTK4 dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libgtk4-layer-shell-dev
+          sudo apt-get install -y libgtk-4-dev meson ninja-build libgirepository1.0-dev gobject-introspection
+
+      - name: Build gtk4-layer-shell
+        run: |
+          git clone https://github.com/wmww/gtk4-layer-shell.git
+          cd gtk4-layer-shell
+          meson setup build
+          ninja -C build
+          sudo ninja -C build install
+          sudo ldconfig
 
       - name: Cache cargo
         uses: actions/cache@v4
