@@ -30,7 +30,10 @@ pub fn shellexpand(s: &str) -> String {
 }
 pub fn themes_dir() -> PathBuf {
     // Built-in themes compiled into binary, but also check config
-    config_dir("").parent().unwrap_or(&PathBuf::from("/tmp")).join("themes")
+    config_dir("")
+        .parent()
+        .unwrap_or(&PathBuf::from("/tmp"))
+        .join("themes")
 }
 
 pub fn builtin_themes() -> Vec<(&'static str, &'static str)> {
@@ -59,10 +62,10 @@ headerbar,
   background: transparent;
 }
 "#;
-    
+
     for (n, css) in builtin_themes() {
-        if n == name { 
-            return Some(format!("{}\n{}", transparency, css)); 
+        if n == name {
+            return Some(format!("{}\n{}", transparency, css));
         }
     }
     None

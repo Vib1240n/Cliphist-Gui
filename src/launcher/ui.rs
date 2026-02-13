@@ -1,15 +1,15 @@
-use std::path::PathBuf;
-use gtk4::prelude::*;
-use gtk4::{
-    Align, Box as GtkBox, Image, Label, ListBox, ListBoxRow, Orientation,
-};
-use common::css::char_truncate;
+use crate::calc::calc_eval;
 use crate::desktop::DesktopEntry;
 use crate::search::filter_entries;
-use crate::calc::calc_eval;
+use common::css::char_truncate;
+use gtk4::prelude::*;
+use gtk4::{Align, Box as GtkBox, Image, Label, ListBox, ListBoxRow, Orientation};
+use std::path::PathBuf;
 
 pub fn load_icon(icon_name: &str, size: i32) -> Option<Image> {
-    if icon_name.is_empty() { return None; }
+    if icon_name.is_empty() {
+        return None;
+    }
 
     if icon_name.starts_with('/') {
         let p = PathBuf::from(icon_name);
@@ -22,7 +22,7 @@ pub fn load_icon(icon_name: &str, size: i32) -> Option<Image> {
 
     let display = gdk4::Display::default()?;
     let theme = gtk4::IconTheme::for_display(&display);
-    
+
     if theme.has_icon(icon_name) {
         let img = Image::from_icon_name(icon_name);
         img.set_pixel_size(size);
@@ -35,7 +35,7 @@ pub fn load_icon(icon_name: &str, size: i32) -> Option<Image> {
 pub fn build_row(entry: &DesktopEntry) -> ListBoxRow {
     let row = ListBoxRow::new();
     row.set_focusable(false);
-    
+
     let hbox = GtkBox::new(Orientation::Horizontal, 14);
     hbox.set_valign(Align::Center);
 
@@ -86,7 +86,7 @@ pub fn build_row(entry: &DesktopEntry) -> ListBoxRow {
 pub fn build_calc_row(expr: &str, result: &str) -> ListBoxRow {
     let row = ListBoxRow::new();
     row.set_focusable(false);
-    
+
     let hbox = GtkBox::new(Orientation::Horizontal, 14);
     hbox.set_valign(Align::Center);
 
@@ -120,8 +120,15 @@ pub fn build_calc_row(expr: &str, result: &str) -> ListBoxRow {
     row
 }
 
-pub fn populate_list(listbox: &ListBox, entries: &[DesktopEntry], query: &str, calc_enabled: bool) -> usize {
-    while let Some(row) = listbox.row_at_index(0) { listbox.remove(&row); }
+pub fn populate_list(
+    listbox: &ListBox,
+    entries: &[DesktopEntry],
+    query: &str,
+    calc_enabled: bool,
+) -> usize {
+    while let Some(row) = listbox.row_at_index(0) {
+        listbox.remove(&row);
+    }
 
     if calc_enabled && query.starts_with('=') && query.len() > 1 {
         let expr = &query[1..];
@@ -136,7 +143,7 @@ pub fn populate_list(listbox: &ListBox, entries: &[DesktopEntry], query: &str, c
 
     let filtered = filter_entries(entries, query);
     let count = filtered.len();
-    
+
     for e in filtered.iter().take(50) {
         listbox.append(&build_row(e));
     }
@@ -146,4 +153,3 @@ pub fn populate_list(listbox: &ListBox, entries: &[DesktopEntry], query: &str, c
     }
     count
 }
-

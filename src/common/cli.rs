@@ -1,10 +1,11 @@
+use crate::paths::config_dir;
 use std::path::PathBuf;
 use std::process::Command;
-use crate::paths::config_dir;
 
 /// Check if a process is running and return its PID
 pub fn get_pid(pidfile: &str) -> Option<i32> {
-    std::fs::read_to_string(pidfile).ok()
+    std::fs::read_to_string(pidfile)
+        .ok()
         .and_then(|s| s.trim().parse::<i32>().ok())
         .filter(|&pid| unsafe { libc::kill(pid, 0) } == 0)
 }
@@ -47,7 +48,9 @@ pub fn cmd_reload(app_name: &str, pidfile: &str) {
     if let Some(pid) = get_pid(pidfile) {
         unsafe { libc::kill(pid, libc::SIGTERM) };
         for _ in 0..20 {
-            if unsafe { libc::kill(pid, 0) } != 0 { break; }
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let _ = std::fs::remove_file(pidfile);
@@ -73,4 +76,3 @@ pub fn remove_pid(pidfile: &str) {
 pub fn pidfile_path(app_name: &str) -> String {
     format!("/tmp/{}-{}.pid", app_name, unsafe { libc::getuid() })
 }
-

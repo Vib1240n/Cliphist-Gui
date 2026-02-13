@@ -1,18 +1,20 @@
-mod config;
 mod app;
+mod calc;
+mod config;
 mod desktop;
 mod search;
-mod calc;
 mod ui;
 
-use std::process::Command;
 use gio;
 use gtk4::prelude::*;
 use gtk4::Application;
+use std::process::Command;
 
-use common::cli::{get_pid, cmd_config, cmd_generate_config, cmd_reload, write_pid, remove_pid, pidfile_path};
-use config::{APP_NAME, default_config, default_css};
 use app::{activate, setup_signals};
+use common::cli::{
+    cmd_config, cmd_generate_config, cmd_reload, get_pid, pidfile_path, remove_pid, write_pid,
+};
+use config::{default_config, default_css, APP_NAME};
 
 fn print_usage() {
     eprintln!("{} - app launcher\n", APP_NAME);
@@ -33,10 +35,22 @@ fn main() {
 
     if args.len() > 1 {
         match args[1].as_str() {
-            "--help" | "-h" => { print_usage(); return; }
-            "--config" => { cmd_config(APP_NAME); return; }
-            "--generate-config" => { cmd_generate_config(APP_NAME, default_css(), default_config()); return; }
-            "--reload" => { cmd_reload(APP_NAME, &pidfile); return; }
+            "--help" | "-h" => {
+                print_usage();
+                return;
+            }
+            "--config" => {
+                cmd_config(APP_NAME);
+                return;
+            }
+            "--generate-config" => {
+                cmd_generate_config(APP_NAME, default_css(), default_config());
+                return;
+            }
+            "--reload" => {
+                cmd_reload(APP_NAME, &pidfile);
+                return;
+            }
             "toggle" | "open" => {
                 if let Some(pid) = get_pid(&pidfile) {
                     unsafe { libc::kill(pid, libc::SIGUSR1) };
@@ -110,4 +124,3 @@ fn main() {
     app.run_with_args::<String>(&[]);
     remove_pid(&pidfile);
 }
-

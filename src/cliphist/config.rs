@@ -1,14 +1,18 @@
 use common::{
-    ConfigBase,
     config::{parse_bool, parse_config_file},
     logging::log,
     paths::config_dir,
+    ConfigBase,
 };
 
 pub const APP_NAME: &str = "cliphist-gui";
 
-pub fn default_config() -> &'static str { include_str!("config.default") }
-pub fn default_css() -> &'static str { include_str!("style.css") }
+pub fn default_config() -> &'static str {
+    include_str!("config.default")
+}
+pub fn default_css() -> &'static str {
+    include_str!("style.css")
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -32,8 +36,10 @@ impl Config {
 
     pub fn load() -> Self {
         let path = config_dir(APP_NAME).join("config");
-        if !path.exists() { return Self::default(); }
-        
+        if !path.exists() {
+            return Self::default();
+        }
+
         match std::fs::read_to_string(&path) {
             Ok(c) => {
                 log(APP_NAME, &format!("loaded config from {}", path.display()));
@@ -63,4 +69,3 @@ impl Config {
         cfg
     }
 }
-

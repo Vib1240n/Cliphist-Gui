@@ -1,9 +1,7 @@
-use gtk4::prelude::*;
-use gtk4::{
-    Align, Box as GtkBox, Label, ListBox, ListBoxRow, Orientation, Picture,
-};
+use crate::entries::{content_type, parse_image_meta, ClipEntry};
 use common::css::char_truncate;
-use crate::entries::{ClipEntry, content_type, parse_image_meta};
+use gtk4::prelude::*;
+use gtk4::{Align, Box as GtkBox, Label, ListBox, ListBoxRow, Orientation, Picture};
 
 const MAX_TEXT_PREVIEW: usize = 120;
 const MAX_SUB_PREVIEW: usize = 60;
@@ -43,8 +41,11 @@ pub fn build_row(entry: &ClipEntry) -> ListBoxRow {
     content.set_valign(Align::Center);
 
     let ctype = content_type(entry);
-    let title_text = if entry.is_image { "Image".to_string() }
-    else { char_truncate(&entry.preview, MAX_TEXT_PREVIEW) };
+    let title_text = if entry.is_image {
+        "Image".to_string()
+    } else {
+        char_truncate(&entry.preview, MAX_TEXT_PREVIEW)
+    };
 
     let title = Label::new(Some(&title_text));
     title.set_xalign(0.0);
@@ -55,7 +56,9 @@ pub fn build_row(entry: &ClipEntry) -> ListBoxRow {
 
     let sub_text = if entry.is_image {
         parse_image_meta(&entry.preview).unwrap_or_default()
-    } else { char_truncate(&entry.preview, MAX_SUB_PREVIEW) };
+    } else {
+        char_truncate(&entry.preview, MAX_SUB_PREVIEW)
+    };
 
     if !sub_text.is_empty() {
         let sub = Label::new(Some(&sub_text));
@@ -83,7 +86,9 @@ pub fn build_row(entry: &ClipEntry) -> ListBoxRow {
 }
 
 pub fn populate_list(listbox: &ListBox, entries: &[ClipEntry], query: &str) -> usize {
-    while let Some(row) = listbox.row_at_index(0) { listbox.remove(&row); }
+    while let Some(row) = listbox.row_at_index(0) {
+        listbox.remove(&row);
+    }
     let q = query.to_lowercase();
     let mut count = 0;
     for e in entries {
@@ -97,4 +102,3 @@ pub fn populate_list(listbox: &ListBox, entries: &[ClipEntry], query: &str) -> u
     }
     count
 }
-

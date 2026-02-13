@@ -12,8 +12,8 @@ pub fn log_dir(app_name: &str) -> PathBuf {
         .join(app_name)
 }
 
-pub fn log_path(app_name: &str) -> PathBuf { 
-    log_dir(app_name).join(format!("{}.log", app_name)) 
+pub fn log_path(app_name: &str) -> PathBuf {
+    log_dir(app_name).join(format!("{}.log", app_name))
 }
 
 pub fn log(app_name: &str, msg: &str) {
@@ -29,21 +29,29 @@ pub fn log(app_name: &str, msg: &str) {
 
     let timestamp = {
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let mut buf = [0u8; 64];
         let len = unsafe {
             let t = now as libc::time_t;
             let mut tm: libc::tm = std::mem::zeroed();
             libc::localtime_r(&t, &mut tm);
             libc::strftime(
-                buf.as_mut_ptr() as *mut libc::c_char, buf.len(),
-                b"%Y-%m-%d %H:%M:%S\0".as_ptr() as *const libc::c_char, &tm,
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+                b"%Y-%m-%d %H:%M:%S\0".as_ptr() as *const libc::c_char,
+                &tm,
             )
         };
         String::from_utf8_lossy(&buf[..len]).to_string()
     };
 
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = writeln!(f, "[{}] {}", timestamp, msg);
     }
 }

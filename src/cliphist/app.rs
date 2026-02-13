@@ -4,21 +4,24 @@ use std::rc::Rc;
 use gdk4::prelude::*;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Application, ApplicationWindow, Box as GtkBox, CssProvider, Entry,
-    EventControllerKey, Label, ListBox, Orientation, ScrolledWindow,
+    Align, Application, ApplicationWindow, Box as GtkBox, CssProvider, Entry, EventControllerKey,
+    Label, ListBox, Orientation, ScrolledWindow,
 };
 
 use common::{
-    Anchor, VimMode, VimAction, Action,
+    css::load_css,
     keys::match_action,
     layer::{apply_layer_shell, update_cursor_position},
     logging::log,
-    css::load_css,
-    vim::{set_vim_mode, get_vim_mode, update_mode_display, handle_vim_normal_key, handle_vim_insert_key},
+    vim::{
+        get_vim_mode, handle_vim_insert_key, handle_vim_normal_key, set_vim_mode,
+        update_mode_display,
+    },
+    Action, Anchor, VimAction, VimMode,
 };
 
-use crate::config::{Config, APP_NAME, default_css};
-use crate::entries::{ClipEntry, fetch_entries, select_entry, delete_entry, get_filtered_entry};
+use crate::config::{default_css, Config, APP_NAME};
+use crate::entries::{delete_entry, fetch_entries, get_filtered_entry, select_entry, ClipEntry};
 use crate::ui::populate_list;
 
 pub struct AppWidgets {
@@ -46,12 +49,14 @@ pub fn activate(app: &Application) {
         if win.is_visible() {
             win.set_visible(false);
         } else {
-            if cfg.base.anchor == Anchor::Cursor { update_cursor_position(&win); }
-            
+            if cfg.base.anchor == Anchor::Cursor {
+                update_cursor_position(&win);
+            }
+
             if cfg.vim_mode {
                 set_vim_mode(VimMode::Normal);
             }
-            
+
             WIDGETS.with(|w| {
                 if let Some(ref wg) = *w.borrow() {
                     let mut ents = wg.entries.borrow_mut();
@@ -59,7 +64,7 @@ pub fn activate(app: &Application) {
                     let n = populate_list(&wg.listbox, &ents, "");
                     wg.status.set_text(&format!("{} items", n));
                     wg.search.set_text("");
-                    
+
                     if cfg.vim_mode {
                         update_mode_display(&wg.mode_label, VimMode::Normal);
                         wg.listbox.grab_focus();
@@ -75,7 +80,8 @@ pub fn activate(app: &Application) {
     }
 
     let css_content = if let Ok(theme) = std::env::var("GUI_THEME_OVERRIDE") {
-        common::paths::get_theme_css(&theme).unwrap_or_else(|| load_css(APP_NAME, &cfg.base.theme, default_css()))
+        common::paths::get_theme_css(&theme)
+            .unwrap_or_else(|| load_css(APP_NAME, &cfg.base.theme, default_css()))
     } else if !cfg.base.theme.contains('/') && !cfg.base.theme.ends_with(".css") {
         common::paths::get_theme_css(&cfg.base.theme).unwrap_or_else(|| default_css().to_string())
     } else {
@@ -150,7 +156,7 @@ pub fn activate(app: &Application) {
     // status bar
     let status_bar = GtkBox::new(Orientation::Horizontal, 0);
     status_bar.add_css_class("clip-status-bar");
-    
+
     let mode_label = Label::new(Some(""));
     mode_label.add_css_class("vim-mode-indicator");
     mode_label.set_halign(Align::Start);
@@ -161,7 +167,7 @@ pub fn activate(app: &Application) {
         mode_label.set_visible(false);
     }
     status_bar.append(&mode_label);
-    
+
     let status = Label::new(Some("0 items"));
     status.add_css_class("clip-status-left");
     status.set_halign(Align::Start);
@@ -170,9 +176,14 @@ pub fn activate(app: &Application) {
 
     let hints = GtkBox::new(Orientation::Horizontal, 12);
     hints.set_halign(Align::End);
-    
+
     if cfg.vim_mode {
-        for (k, h) in [("i", "insert"), ("j/k", "nav"), ("dd", "delete"), ("Enter", "select")] {
+        for (k, h) in [
+            ("i", "insert"),
+            ("j/k", "nav"),
+            ("dd", "delete"),
+            ("Enter", "select"),
+        ] {
             let b = GtkBox::new(Orientation::Horizontal, 0);
             let kl = Label::new(Some(k));
             kl.add_css_class("clip-status-key");
@@ -227,7 +238,7 @@ pub fn activate(app: &Application) {
 
         if vim_enabled {
             let current_mode = get_vim_mode();
-            
+
             match current_mode {
                 VimMode::Normal => {
                     // allow_delete = true for cliphist (dd works)
@@ -239,16 +250,22 @@ pub fn activate(app: &Application) {
                             VimAction::Select => {
                                 if let Some(row) = lk.selected_row() {
                                     let ents = ek.borrow();
-                                    if let Some(e) = get_filtered_entry(&ents, &sk.text(), row.index() as usize) {
+                                    if let Some(e) =
+                                        get_filtered_entry(&ents, &sk.text(), row.index() as usize)
+                                    {
                                         select_entry(&e, notify);
-                                        if close_on_select { wk.set_visible(false); }
+                                        if close_on_select {
+                                            wk.set_visible(false);
+                                        }
                                     }
                                 }
                             }
                             VimAction::Delete => {
                                 if let Some(row) = lk.selected_row() {
                                     let ents = ek.borrow();
-                                    if let Some(e) = get_filtered_entry(&ents, &sk.text(), row.index() as usize) {
+                                    if let Some(e) =
+                                        get_filtered_entry(&ents, &sk.text(), row.index() as usize)
+                                    {
                                         delete_entry(&e);
                                     }
                                     drop(ents);
@@ -298,7 +315,8 @@ pub fn activate(app: &Application) {
                             }
                             VimAction::HalfPageDown => {
                                 if let Some(r) = lk.selected_row() {
-                                    let t = (r.index() + 10).min(lk.observe_children().n_items() as i32 - 1);
+                                    let t = (r.index() + 10)
+                                        .min(lk.observe_children().n_items() as i32 - 1);
                                     if let Some(nr) = lk.row_at_index(t) {
                                         lk.select_row(Some(&nr));
                                         common::css::scroll_to_selected(&lk, &scroll_k);
@@ -332,19 +350,23 @@ pub fn activate(app: &Application) {
                         }
                         return glib::Propagation::Stop;
                     }
-                    
+
                     // Enter in insert mode -> select
                     if key == gdk4::Key::Return {
                         if let Some(row) = lk.selected_row() {
                             let ents = ek.borrow();
-                            if let Some(e) = get_filtered_entry(&ents, &sk.text(), row.index() as usize) {
+                            if let Some(e) =
+                                get_filtered_entry(&ents, &sk.text(), row.index() as usize)
+                            {
                                 select_entry(&e, notify);
-                                if close_on_select { wk.set_visible(false); }
+                                if close_on_select {
+                                    wk.set_visible(false);
+                                }
                             }
                         }
                         return glib::Propagation::Stop;
                     }
-                    
+
                     return glib::Propagation::Proceed;
                 }
             }
@@ -354,20 +376,28 @@ pub fn activate(app: &Application) {
 
             if let Some(action) = action {
                 match action {
-                    Action::Close => { wk.set_visible(false); }
+                    Action::Close => {
+                        wk.set_visible(false);
+                    }
                     Action::Select => {
                         if let Some(row) = lk.selected_row() {
                             let ents = ek.borrow();
-                            if let Some(e) = get_filtered_entry(&ents, &sk.text(), row.index() as usize) {
+                            if let Some(e) =
+                                get_filtered_entry(&ents, &sk.text(), row.index() as usize)
+                            {
                                 select_entry(&e, notify);
-                                if close_on_select { wk.set_visible(false); }
+                                if close_on_select {
+                                    wk.set_visible(false);
+                                }
                             }
                         }
                     }
                     Action::Delete => {
                         if let Some(row) = lk.selected_row() {
                             let ents = ek.borrow();
-                            if let Some(e) = get_filtered_entry(&ents, &sk.text(), row.index() as usize) {
+                            if let Some(e) =
+                                get_filtered_entry(&ents, &sk.text(), row.index() as usize)
+                            {
                                 delete_entry(&e);
                             }
                             drop(ents);
@@ -377,7 +407,9 @@ pub fn activate(app: &Application) {
                             stk.set_text(&format!("{} items", n));
                         }
                     }
-                    Action::ClearSearch => { sk.set_text(""); }
+                    Action::ClearSearch => {
+                        sk.set_text("");
+                    }
                     Action::Next => {
                         if let Some(r) = lk.selected_row() {
                             if let Some(n) = lk.row_at_index(r.index() + 1) {
@@ -398,7 +430,8 @@ pub fn activate(app: &Application) {
                     }
                     Action::PageDown => {
                         if let Some(r) = lk.selected_row() {
-                            let t = (r.index() + 10).min(lk.observe_children().n_items() as i32 - 1);
+                            let t =
+                                (r.index() + 10).min(lk.observe_children().n_items() as i32 - 1);
                             if let Some(nr) = lk.row_at_index(t) {
                                 lk.select_row(Some(&nr));
                                 common::css::scroll_to_selected(&lk, &scroll_k);
@@ -446,7 +479,9 @@ pub fn activate(app: &Application) {
         let ents = ec.borrow();
         if let Some(e) = get_filtered_entry(&ents, &sc.text(), row.index() as usize) {
             select_entry(&e, cfg_c.notify_on_copy);
-            if cfg_c.close_on_select { wc.set_visible(false); }
+            if cfg_c.close_on_select {
+                wc.set_visible(false);
+            }
         }
     });
 
@@ -468,15 +503,20 @@ pub fn activate(app: &Application) {
     }
 
     window.present();
-    
+
     if cfg.vim_mode {
         listbox.grab_focus();
     } else {
         search.grab_focus();
     }
-    
-    log(APP_NAME, &format!("daemon started ({}x{}, anchor={:?}, vim={})", 
-        cfg.base.width, cfg.base.height, cfg.base.anchor, cfg.vim_mode));
+
+    log(
+        APP_NAME,
+        &format!(
+            "daemon started ({}x{}, anchor={:?}, vim={})",
+            cfg.base.width, cfg.base.height, cfg.base.anchor, cfg.vim_mode
+        ),
+    );
 }
 
 pub fn setup_signals(app: &Application) {
@@ -490,12 +530,14 @@ pub fn setup_signals(app: &Application) {
                 if win.is_visible() {
                     win.set_visible(false);
                 } else {
-                    if cfg.base.anchor == Anchor::Cursor { update_cursor_position(&win); }
-                    
+                    if cfg.base.anchor == Anchor::Cursor {
+                        update_cursor_position(&win);
+                    }
+
                     if cfg.vim_mode {
                         set_vim_mode(VimMode::Normal);
                     }
-                    
+
                     WIDGETS.with(|w| {
                         if let Some(ref wg) = *w.borrow() {
                             let mut ents = wg.entries.borrow_mut();
@@ -503,7 +545,7 @@ pub fn setup_signals(app: &Application) {
                             let n = populate_list(&wg.listbox, &ents, "");
                             wg.status.set_text(&format!("{} items", n));
                             wg.search.set_text("");
-                            
+
                             if cfg.vim_mode {
                                 update_mode_display(&wg.mode_label, VimMode::Normal);
                                 wg.listbox.grab_focus();
@@ -537,4 +579,3 @@ pub fn setup_signals(app: &Application) {
         }
     });
 }
-

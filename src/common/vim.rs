@@ -1,7 +1,7 @@
-use std::cell::RefCell;
+use crate::keys::{key_to_char, VimMode};
 use gtk4::prelude::*;
 use gtk4::Label;
-use crate::keys::{VimMode, key_to_char};
+use std::cell::RefCell;
 
 thread_local! {
     pub static VIM_STATE: RefCell<VimMode> = RefCell::new(VimMode::Normal);
@@ -56,17 +56,17 @@ pub fn handle_vim_normal_key(
     allow_delete: bool,
 ) -> Option<VimAction> {
     let key_char = key_to_char(key);
-    
+
     // Escape -> close
     if key == gdk4::Key::Escape {
         return Some(VimAction::Close);
     }
-    
+
     // Enter -> select
     if key == gdk4::Key::Return {
         return Some(VimAction::Select);
     }
-    
+
     // Check for vim keys
     if let Some(c) = key_char {
         match c {
@@ -110,7 +110,7 @@ pub fn handle_vim_normal_key(
             }
         }
     }
-    
+
     // Ctrl+d / Ctrl+u for half page
     if mods.contains(gdk4::ModifierType::CONTROL_MASK) {
         if let Some(c) = key_char {
@@ -121,7 +121,7 @@ pub fn handle_vim_normal_key(
             }
         }
     }
-    
+
     None
 }
 
@@ -133,4 +133,3 @@ pub fn handle_vim_insert_key(key: gdk4::Key) -> Option<VimAction> {
     }
     None
 }
-

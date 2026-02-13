@@ -1,19 +1,27 @@
 use crate::desktop::{DesktopEntry, FREQUENCY};
 
 pub fn fuzzy_match(query: &str, text: &str) -> Option<i32> {
-    if query.is_empty() { return Some(0); }
-    
+    if query.is_empty() {
+        return Some(0);
+    }
+
     let q = query.to_lowercase();
     let t = text.to_lowercase();
-    
-    if t == q { return Some(1000); }
-    if t.starts_with(&q) { return Some(500 + (100 - q.len() as i32)); }
-    if t.contains(&q) { return Some(200); }
-    
+
+    if t == q {
+        return Some(1000);
+    }
+    if t.starts_with(&q) {
+        return Some(500 + (100 - q.len() as i32));
+    }
+    if t.contains(&q) {
+        return Some(200);
+    }
+
     let mut qi = q.chars().peekable();
     let mut score = 0;
     let mut consecutive = 0;
-    
+
     for c in t.chars() {
         if qi.peek() == Some(&c) {
             qi.next();
@@ -23,8 +31,12 @@ pub fn fuzzy_match(query: &str, text: &str) -> Option<i32> {
             consecutive = 0;
         }
     }
-    
-    if qi.peek().is_none() { Some(score) } else { None }
+
+    if qi.peek().is_none() {
+        Some(score)
+    } else {
+        None
+    }
 }
 
 pub fn filter_entries(entries: &[DesktopEntry], query: &str) -> Vec<DesktopEntry> {
@@ -32,7 +44,8 @@ pub fn filter_entries(entries: &[DesktopEntry], query: &str) -> Vec<DesktopEntry
         return entries.to_vec();
     }
 
-    let mut matched: Vec<(DesktopEntry, i32)> = entries.iter()
+    let mut matched: Vec<(DesktopEntry, i32)> = entries
+        .iter()
         .filter_map(|e| {
             let name_score = fuzzy_match(query, &e.name);
             let desc_score = fuzzy_match(query, &e.description).map(|s| s / 2);
@@ -54,8 +67,11 @@ pub fn filter_entries(entries: &[DesktopEntry], query: &str) -> Vec<DesktopEntry
     matched.into_iter().map(|(e, _)| e).collect()
 }
 
-pub fn get_filtered_entry(entries: &[DesktopEntry], query: &str, idx: usize) -> Option<DesktopEntry> {
+pub fn get_filtered_entry(
+    entries: &[DesktopEntry],
+    query: &str,
+    idx: usize,
+) -> Option<DesktopEntry> {
     let filtered = filter_entries(entries, query);
     filtered.get(idx).cloned()
 }
-
