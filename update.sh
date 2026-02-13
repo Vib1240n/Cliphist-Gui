@@ -27,9 +27,9 @@ case "${1:-}" in
         BINS="cliphist-gui launch-gui"
         ;;
     "")
-        echo "What would you like to install?"
-        echo "  1) cliphist-gui (clipboard manager)"
-        echo "  2) launch-gui (app launcher)"
+        echo "What would you like to update?"
+        echo "  1) cliphist-gui"
+        echo "  2) launch-gui"
         echo "  3) both"
         read -p "Choice [1/2/3]: " choice
         case "$choice" in
@@ -47,69 +47,71 @@ esac
 
 # Check dependencies
 command -v curl >/dev/null 2>&1 || error "curl is required"
-command -v jq >/dev/null 2>&1 || error "jq is required (install: sudo pacman -S jq)"
+command -v jq >/dev/null 2>&1 || error "jq is required"
 
 # Get latest release
-info "Fetching latest release..."
+info "Checking for updates..."
 RELEASE_DATA=$(curl -s "https://api.github.com/repos/$REPO/releases/latest")
 TAG=$(echo "$RELEASE_DATA" | jq -r '.tag_name')
 
 if [ "$TAG" = "null" ] || [ -z "$TAG" ]; then
-    error "Could not fetch latest release. Check https://github.com/$REPO/releases"
+    error "Could not fetch latest release"
 fi
 
 info "Latest version: $TAG"
 
-# Create install directory
-mkdir -p "$INSTALL_DIR"
-
 # Download checksums
-info "Downloading checksums..."
 CHECKSUM_URL="https://github.com/$REPO/releases/download/$TAG/checksums.txt"
 CHECKSUMS=$(curl -sL "$CHECKSUM_URL") || error "Failed to download checksums"
 
-# Download and install each binary
+UPDATED=0
+
 for bin in $BINS; do
     FILENAME="${bin}-${ARCH}"
+    
+    # Check if installed
+    if [ ! -f "$INSTALL_DIR/$bin" ]; then
+        warn "$bin not installed, skipping (use install.sh)"
+        continue
+    fi
+    
+    # Compare checksums
+    EXPECTED=$(echo "$CHECKSUMS" | grep "$FILENAME" | awk '{print $1}')
+    CURRENT=$(sha256sum "$INSTALL_DIR/$bin" | awk '{print $1}')
+    
+    if [ "$EXPECTED" = "$CURRENT" ]; then
+        info "$bin is already up to date"
+        continue
+    fi
+    
+    info "Updating $bin..."
     URL="https://github.com/$REPO/releases/download/$TAG/$FILENAME"
     
-    info "Downloading $bin..."
     curl -sL "$URL" -o "/tmp/$FILENAME" || error "Failed to download $bin"
     
     # Verify checksum
-    info "Verifying checksum..."
-    EXPECTED=$(echo "$CHECKSUMS" | grep "$FILENAME" | awk '{print $1}')
     ACTUAL=$(sha256sum "/tmp/$FILENAME" | awk '{print $1}')
-    
     if [ "$EXPECTED" != "$ACTUAL" ]; then
         error "Checksum mismatch for $bin!"
     fi
     
-    # Kill existing process
+    # Kill, update, restart
     pkill "$bin" 2>/dev/null || true
+    sleep 0.3
     
-    # Install
     mv "/tmp/$FILENAME" "$INSTALL_DIR/$bin"
     chmod +x "$INSTALL_DIR/$bin"
     
-    info "$bin installed to $INSTALL_DIR/$bin"
+    # Restart daemon
+    "$INSTALL_DIR/$bin" > /dev/null 2>&1 &
+    
+    info "$bin updated and restarted"
+    UPDATED=$((UPDATED + 1))
 done
 
-# Check PATH
-if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-    warn "$INSTALL_DIR is not in your PATH"
-    echo "Add this to your ~/.bashrc or ~/.zshrc:"
-    echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+echo ""
+if [ $UPDATED -gt 0 ]; then
+    info "Updated $UPDATED binary(ies) to $TAG"
+else
+    info "Everything is up to date"
 fi
-
-echo ""
-info "Installation complete!"
-echo ""
-echo "Start the daemons:"
-for bin in $BINS; do
-    echo "  $bin &"
-done
-echo ""
-echo "Or add to your Hyprland config:"
-echo "  exec-once = cliphist-gui"
-echo "  exec-once = launch-gui"
