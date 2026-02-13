@@ -1,5 +1,4 @@
 use crate::paths::config_dir;
-use std::path::PathBuf;
 use std::process::Command;
 
 /// Check if a process is running and return its PID

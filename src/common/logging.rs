@@ -20,13 +20,11 @@ pub fn log(app_name: &str, msg: &str) {
     let dir = log_dir(app_name);
     let _ = std::fs::create_dir_all(&dir);
     let path = log_path(app_name);
-
     if let Ok(meta) = std::fs::metadata(&path) {
         if meta.len() > MAX_LOG_SIZE {
             let _ = std::fs::rename(&path, dir.join(format!("{}.log.1", app_name)));
         }
     }
-
     let timestamp = {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -40,13 +38,12 @@ pub fn log(app_name: &str, msg: &str) {
             libc::strftime(
                 buf.as_mut_ptr() as *mut libc::c_char,
                 buf.len(),
-                b"%Y-%m-%d %H:%M:%S\0".as_ptr() as *const libc::c_char,
+                c"%Y-%m-%d %H:%M:%S".as_ptr(),
                 &tm,
             )
         };
         String::from_utf8_lossy(&buf[..len]).to_string()
     };
-
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

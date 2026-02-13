@@ -21,13 +21,14 @@ pub fn cache_dir(app_name: &str) -> PathBuf {
 }
 
 pub fn shellexpand(s: &str) -> String {
-    if s.starts_with("~/") {
+    if let Some(stripped) = s.strip_prefix("~/") {
         if let Ok(h) = std::env::var("HOME") {
-            return format!("{}/{}", h, &s[2..]);
+            return format!("{}/{}", h, stripped);
         }
     }
     s.to_string()
 }
+
 pub fn themes_dir() -> PathBuf {
     // Built-in themes compiled into binary, but also check config
     config_dir("")
@@ -62,7 +63,6 @@ headerbar,
   background: transparent;
 }
 "#;
-
     for (n, css) in builtin_themes() {
         if n == name {
             return Some(format!("{}\n{}", transparency, css));
