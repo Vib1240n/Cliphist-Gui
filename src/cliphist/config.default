@@ -1,49 +1,22 @@
-# ===========================================================
-# cliphist-gui configuration
-# Location: ~/.config/cliphist-gui/config
-# ===========================================================
-
 [window]
-# Window dimensions in pixels
 width = 580
 height = 520
-
-# Window position on screen
-# Options: center, top, top-left, top-right, bottom, bottom-left, bottom-right, cursor
 anchor = center
-
-# Margins from screen edges (pixels, used with non-center anchors)
 margin_top = 0
 margin_bottom = 0
 margin_left = 0
 margin_right = 0
 
 [style]
-# Path to CSS theme file
-# Use ~ for home directory expansion
-theme = ~/.config/cliphist-gui/style.css
+theme = default
 
 [behavior]
-# Maximum entries to display (0 = unlimited)
 max_items = 0
-
-# Hide window after selecting an entry
 close_on_select = true
-
-# Send desktop notification after copying
 notify_on_copy = false
+vim_mode = false
 
 [keybinds]
-# Format: action = Key1 Key2 ...
-# Multiple keys separated by spaces (all trigger the same action)
-# Modifiers: Ctrl, Shift, Alt, Super (joined with +)
-# Examples: Return, Ctrl+u, Shift+Tab, Delete, Page_Down
-#
-# Available keys:
-#   Letters: a-z
-#   Special: Return Enter Escape Esc Tab Delete Del Backspace Space
-#   Navigation: Up Down Left Right Home End Page_Up Page_Down
-
 select = Return Enter
 delete = Delete
 clear_search = Ctrl+u
@@ -54,3 +27,4 @@ page_down = Page_Down
 page_up = Page_Up
 first = Home
 last = End
+
