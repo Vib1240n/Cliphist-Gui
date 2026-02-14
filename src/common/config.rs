@@ -15,6 +15,59 @@ pub enum Anchor {
     Cursor,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Easing {
+    Linear,
+    EaseIn,
+    #[default]
+    EaseOut,
+    EaseInOut,
+    Bounce,
+}
+
+impl Easing {
+    /// Apply easing function to t (0.0 to 1.0)
+    pub fn apply(&self, t: f64) -> f64 {
+        match self {
+            Easing::Linear => t,
+            Easing::EaseIn => t * t * t,
+            Easing::EaseOut => 1.0 - (1.0 - t).powi(3),
+            Easing::EaseInOut => {
+                if t < 0.5 {
+                    4.0 * t * t * t
+                } else {
+                    1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+                }
+            }
+            Easing::Bounce => {
+                if t < 1.0 {
+                    // Overshoot then settle
+                    let t2 = t * 1.2;
+                    if t2 <= 1.0 {
+                        1.0 - (1.0 - t2).powi(2)
+                    } else {
+                        let over = t2 - 1.0;
+                        1.0 + 0.1 * (1.0 - over * 5.0)
+                    }
+                } else {
+                    1.0
+                }
+            }
+        }
+    }
+}
+
+pub fn parse_easing(s: &str) -> Easing {
+    match s.to_lowercase().replace('-', "_").as_str() {
+        "linear" => Easing::Linear,
+        "ease_in" | "easein" => Easing::EaseIn,
+        "ease_out" | "easeout" => Easing::EaseOut,
+        "ease_in_out" | "easeinout" => Easing::EaseInOut,
+        "bounce" => Easing::Bounce,
+        _ => Easing::EaseOut,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ConfigBase {
     pub width: i32,
@@ -101,18 +154,15 @@ pub fn parse_bool(s: &str, default: bool) -> bool {
 pub fn parse_config_file(content: &str) -> Vec<(String, String, String)> {
     let mut results = Vec::new();
     let mut section = String::new();
-
     for line in content.lines() {
         let t = line.trim();
         if t.is_empty() || t.starts_with('#') {
             continue;
         }
-
         if t.starts_with('[') && t.ends_with(']') {
             section = t[1..t.len() - 1].trim().to_lowercase();
             continue;
         }
-
         if let Some((k, v)) = t.split_once('=') {
             results.push((
                 section.clone(),

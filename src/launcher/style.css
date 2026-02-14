@@ -2,34 +2,59 @@
  * launch-gui - App Launcher Theme
  * Location: ~/.config/launch-gui/style.css
  * =========================================================== */
-window {
+
+window,
+window.background {
   background-color: transparent;
 }
+
+/* -- Container -- */
 .launch-container {
   background-color: alpha(#141618, 0.92);
-  border-radius: 16px;
   border: 1px solid alpha(#57595c, 0.3);
   padding: 0;
 }
-/* -- Header -- */
-.launch-header {
-  padding: 20px 24px 4px 24px;
+
+.launch-container.collapsed {
+  border-radius: 28px;
 }
+
+.launch-container.expanded {
+  border-radius: 16px;
+}
+
+/* -- Search Wrapper -- */
+.launch-search-wrapper {
+  padding: 12px 16px;
+}
+
+.launch-container.expanded .launch-search-wrapper {
+  padding: 16px 20px 8px 20px;
+}
+
+/* -- Search Row -- */
 .launch-search-row {
-  margin-bottom: 4px;
+  margin: 0;
 }
+
 .launch-search {
   background-color: alpha(#292c30, 0.6);
   border: 1px solid alpha(#57595c, 0.2);
-  border-radius: 10px;
-  padding: 10px 14px;
+  border-radius: 12px;
+  padding: 12px 16px;
   color: #fcfcfc;
   font-size: 15px;
   min-height: 22px;
 }
+
+.launch-container.collapsed .launch-search {
+  border-radius: 16px;
+}
+
 .launch-search:focus {
   border-color: alpha(#3daee9, 0.5);
 }
+
 .launch-esc-badge {
   background-color: alpha(#57595c, 0.35);
   border-radius: 6px;
@@ -39,33 +64,42 @@ window {
   color: alpha(#fcfcfc, 0.5);
   margin-right: 4px;
 }
+
 .launch-hint-text {
   color: alpha(#fcfcfc, 0.35);
   font-size: 11px;
 }
+
+/* -- Section Label -- */
 .launch-section-label {
   color: alpha(#fcfcfc, 0.55);
   font-size: 12px;
   font-weight: 600;
-  padding: 8px 4px 4px 4px;
+  padding: 8px 24px 4px 24px;
 }
+
 /* -- List -- */
 .launch-list {
   background-color: transparent;
+  padding: 0 8px;
 }
+
 .launch-list row {
   background-color: transparent;
   border-radius: 12px;
-  margin: 1px 8px;
+  margin: 1px 0;
   padding: 10px 14px;
   transition: background-color 150ms ease;
 }
+
 .launch-list row:hover {
   background-color: alpha(#3daee9, 0.08);
 }
+
 .launch-list row:selected {
   background-color: alpha(#3daee9, 0.15);
 }
+
 /* -- Icons -- */
 .launch-icon-box {
   background-color: alpha(#292c30, 0.8);
@@ -73,35 +107,42 @@ window {
   min-width: 48px;
   min-height: 48px;
 }
+
 .launch-icon-fallback {
   color: alpha(#3daee9, 0.6);
   font-size: 20px;
   font-weight: bold;
 }
+
 /* -- Content -- */
 .launch-title {
   color: #fcfcfc;
   font-size: 14px;
   font-weight: 600;
 }
+
 .launch-subtitle {
   color: alpha(#fcfcfc, 0.4);
   font-size: 11px;
   margin-top: 1px;
 }
+
 .launch-calc-result {
   color: #3daee9;
   font-size: 18px;
 }
+
 /* -- Status Bar -- */
 .launch-status-bar {
-  padding: 10px 24px;
+  padding: 10px 20px;
   border-top: 1px solid alpha(#57595c, 0.15);
 }
+
 .launch-status-left {
   color: alpha(#fcfcfc, 0.3);
   font-size: 11px;
 }
+
 .launch-status-key {
   background-color: alpha(#57595c, 0.3);
   border-radius: 4px;
@@ -110,12 +151,14 @@ window {
   font-weight: 600;
   color: alpha(#fcfcfc, 0.45);
 }
+
 .launch-status-hint {
   color: alpha(#fcfcfc, 0.3);
   font-size: 10px;
   margin-left: 4px;
 }
-/* Vim mode indicator */
+
+/* -- Vim Mode Indicator -- */
 .vim-mode-indicator {
   font-family: monospace;
   font-weight: bold;
