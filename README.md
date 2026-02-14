@@ -1,4 +1,3 @@
-```markdown
 # cliphist-gui & launch-gui
 
 A clipboard manager and app launcher for Wayland. Built with GTK4 and Layer Shell. Lightweight, fast, and fully keyboard-driven with optional vim keybindings.
@@ -107,4 +106,3 @@ I wanted a clipboard manager and launcher that looked good, stayed out of my way
 ## License
 
 MIT
-```

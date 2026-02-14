@@ -1,5 +1,5 @@
 use common::{
-    config::{parse_bool, parse_config_file},
+    config::{parse_bool, parse_config_file, parse_easing, Easing},
     logging::log,
     paths::config_dir,
     ConfigBase,
@@ -10,6 +10,7 @@ pub const APP_NAME: &str = "launch-gui";
 pub fn default_config() -> &'static str {
     include_str!("config.default")
 }
+
 pub fn default_css() -> &'static str {
     include_str!("style.css")
 }
@@ -17,6 +18,9 @@ pub fn default_css() -> &'static str {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub base: ConfigBase,
+    pub search_height: i32,
+    pub animation_duration: u64,
+    pub animation_easing: Easing,
     pub terminal: String,
     pub calculator: bool,
     pub vim_mode: bool,
@@ -26,6 +30,9 @@ impl Config {
     pub fn default() -> Self {
         Self {
             base: ConfigBase::new(APP_NAME, 580, 400),
+            search_height: 70,
+            animation_duration: 200,
+            animation_easing: Easing::EaseOut,
             terminal: "kitty".to_string(),
             calculator: true,
             vim_mode: false,
@@ -37,7 +44,6 @@ impl Config {
         if !path.exists() {
             return Self::default();
         }
-
         match std::fs::read_to_string(&path) {
             Ok(c) => {
                 log(APP_NAME, &format!("loaded config from {}", path.display()));
@@ -54,13 +60,25 @@ impl Config {
         let mut cfg = Self::default();
         for (section, key, val) in parse_config_file(content) {
             cfg.base.parse_section(APP_NAME, &section, &key, &val);
-            if section == "behavior" {
-                match key.as_str() {
+            match section.as_str() {
+                "window" => {
+                    if key == "search_height" {
+                        cfg.search_height = val.parse().unwrap_or(70);
+                    }
+                }
+                "behavior" => match key.as_str() {
                     "terminal" => cfg.terminal = val,
                     "calculator" => cfg.calculator = parse_bool(&val, true),
                     "vim_mode" => cfg.vim_mode = parse_bool(&val, false),
+                    "animation_duration" => {
+                        cfg.animation_duration = val.parse().unwrap_or(200);
+                    }
+                    "animation_easing" => {
+                        cfg.animation_easing = parse_easing(&val);
+                    }
                     _ => {}
-                }
+                },
+                _ => {}
             }
         }
         cfg

@@ -1,34 +1,62 @@
-window {
+/* Monokai Theme */
+window,
+window.background {
   background-color: transparent;
 }
+
 .launch-container,
 .clip-container {
   background-color: alpha(#272822, 0.92);
-  border-radius: 16px;
   border: 1px solid alpha(#49483e, 0.4);
 }
+
+.launch-container.collapsed {
+  border-radius: 28px;
+}
+
+.launch-container.expanded,
+.clip-container {
+  border-radius: 16px;
+}
+
+.launch-search-wrapper {
+  padding: 12px 16px;
+}
+
+.launch-container.expanded .launch-search-wrapper {
+  padding: 16px 20px 8px 20px;
+}
+
 .launch-header,
 .clip-header {
   padding: 20px 24px 4px 24px;
 }
+
 .launch-search-row,
 .clip-search-row {
   margin-bottom: 4px;
 }
+
 .launch-search,
 .clip-search {
   background-color: alpha(#3e3d32, 0.6);
   border: 1px solid alpha(#49483e, 0.3);
-  border-radius: 10px;
-  padding: 10px 14px;
+  border-radius: 12px;
+  padding: 12px 16px;
   color: #f8f8f2;
   font-size: 15px;
   min-height: 22px;
 }
+
+.launch-container.collapsed .launch-search {
+  border-radius: 16px;
+}
+
 .launch-search:focus,
 .clip-search:focus {
-  border-color: alpha(#a6e22e, 0.6);
+  border-color: alpha(#66d9ef, 0.6);
 }
+
 .launch-esc-badge,
 .clip-esc-badge {
   background-color: alpha(#49483e, 0.5);
@@ -38,37 +66,45 @@ window {
   font-weight: 600;
   color: alpha(#f8f8f2, 0.6);
 }
+
 .launch-hint-text,
 .clip-hint-text {
   color: alpha(#f8f8f2, 0.4);
   font-size: 11px;
 }
+
 .launch-section-label,
 .clip-section-label {
   color: alpha(#f8f8f2, 0.6);
   font-size: 12px;
   font-weight: 600;
-  padding: 8px 4px 4px 4px;
+  padding: 8px 24px 4px 24px;
 }
+
 .launch-list,
 .clip-list {
   background-color: transparent;
+  padding: 0 8px;
 }
+
 .launch-list row,
 .clip-list row {
   background-color: transparent;
   border-radius: 12px;
-  margin: 1px 8px;
+  margin: 1px 0;
   padding: 10px 14px;
 }
+
 .launch-list row:hover,
 .clip-list row:hover {
-  background-color: alpha(#f92672, 0.08);
+  background-color: alpha(#66d9ef, 0.08);
 }
+
 .launch-list row:selected,
 .clip-list row:selected {
-  background-color: alpha(#f92672, 0.15);
+  background-color: alpha(#66d9ef, 0.15);
 }
+
 .launch-icon-box,
 .clip-text-icon,
 .clip-thumb-frame {
@@ -77,42 +113,50 @@ window {
   min-width: 48px;
   min-height: 48px;
 }
+
 .launch-icon-fallback,
 .clip-text-icon-label {
-  color: #f92672;
+  color: #66d9ef;
   font-size: 20px;
   font-weight: bold;
 }
+
 .launch-title,
 .clip-title {
   color: #f8f8f2;
   font-size: 14px;
   font-weight: 600;
 }
+
 .launch-subtitle,
 .clip-subtitle {
   color: alpha(#f8f8f2, 0.5);
   font-size: 11px;
 }
+
 .launch-calc-result {
   color: #a6e22e;
   font-size: 18px;
 }
+
 .clip-badge {
   color: alpha(#f8f8f2, 0.4);
   font-size: 10px;
   font-weight: 600;
 }
+
 .launch-status-bar,
 .clip-status-bar {
-  padding: 10px 24px;
+  padding: 10px 20px;
   border-top: 1px solid alpha(#49483e, 0.2);
 }
+
 .launch-status-left,
 .clip-status-left {
   color: alpha(#f8f8f2, 0.4);
   font-size: 11px;
 }
+
 .launch-status-key,
 .clip-status-key {
   background-color: alpha(#49483e, 0.4);
@@ -122,9 +166,29 @@ window {
   font-weight: 600;
   color: alpha(#f8f8f2, 0.6);
 }
+
 .launch-status-hint,
 .clip-status-hint {
   color: alpha(#f8f8f2, 0.4);
   font-size: 10px;
   margin-left: 4px;
+}
+
+.vim-mode-indicator {
+  font-family: monospace;
+  font-weight: bold;
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin-right: 12px;
+}
+
+.vim-mode-normal {
+  background: #66d9ef;
+  color: #272822;
+}
+
+.vim-mode-insert {
+  background: #a6e22e;
+  color: #272822;
 }

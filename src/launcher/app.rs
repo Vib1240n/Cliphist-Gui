@@ -10,6 +10,7 @@ use gtk4::{
 };
 
 use common::{
+    config::Easing,
     css::load_css,
     keys::match_action,
     layer::{apply_layer_shell, update_cursor_position},
@@ -30,14 +31,137 @@ use crate::ui::populate_list;
 pub struct AppWidgets {
     pub search: Entry,
     pub listbox: ListBox,
+    pub scroll: ScrolledWindow,
+    pub section_label: Label,
+    pub status_bar: GtkBox,
     pub status: Label,
     pub mode_label: Label,
+    pub container: GtkBox,
     pub entries: Rc<RefCell<Vec<DesktopEntry>>>,
 }
 
 thread_local! {
     pub static WIDGETS: RefCell<Option<AppWidgets>> = const { RefCell::new(None) };
     pub static CONFIG: RefCell<Config> = RefCell::new(Config::default());
+    pub static EXPANDED: RefCell<bool> = const { RefCell::new(false) };
+}
+
+fn set_expanded(expanded: bool) {
+    EXPANDED.with(|e| *e.borrow_mut() = expanded);
+}
+
+fn is_expanded() -> bool {
+    EXPANDED.with(|e| *e.borrow())
+}
+
+/// Animate height transition
+#[allow(clippy::too_many_arguments)]
+fn animate_height(
+    container: &GtkBox,
+    scroll: &ScrolledWindow,
+    section_label: &Label,
+    status_bar: &GtkBox,
+    from_height: i32,
+    to_height: i32,
+    duration_ms: u64,
+    easing: Easing,
+    expanding: bool,
+) {
+    let steps = 20;
+    let step_ms = duration_ms / steps;
+
+    // Update CSS classes immediately
+    if expanding {
+        container.remove_css_class("collapsed");
+        container.add_css_class("expanded");
+        scroll.set_visible(true);
+        section_label.set_visible(true);
+        status_bar.set_visible(true);
+    } else {
+        container.remove_css_class("expanded");
+        container.add_css_class("collapsed");
+    }
+
+    let container = container.clone();
+    let scroll = scroll.clone();
+    let section_label = section_label.clone();
+    let status_bar = status_bar.clone();
+    let step = Rc::new(std::cell::Cell::new(0u64));
+    let step_clone = step.clone();
+
+    let width = container.width();
+
+    glib::timeout_add_local(std::time::Duration::from_millis(step_ms), move || {
+        let s = step_clone.get() + 1;
+        step_clone.set(s);
+
+        let t = s as f64 / steps as f64;
+        let eased = easing.apply(t);
+        let current = from_height as f64 + (to_height - from_height) as f64 * eased;
+
+        container.set_size_request(width, current as i32);
+
+        if s >= steps {
+            container.set_size_request(width, to_height);
+
+            // Hide elements after collapse animation completes
+            if !expanding {
+                scroll.set_visible(false);
+                section_label.set_visible(false);
+                status_bar.set_visible(false);
+            }
+
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
+    });
+}
+
+fn expand(cfg: &Config) {
+    if is_expanded() {
+        return;
+    }
+    set_expanded(true);
+
+    WIDGETS.with(|w| {
+        if let Some(ref wg) = *w.borrow() {
+            animate_height(
+                &wg.container,
+                &wg.scroll,
+                &wg.section_label,
+                &wg.status_bar,
+                cfg.search_height,
+                cfg.base.height,
+                cfg.animation_duration,
+                cfg.animation_easing,
+                true,
+            );
+        }
+    });
+}
+
+fn collapse(cfg: &Config) {
+    if !is_expanded() {
+        return;
+    }
+    set_expanded(false);
+
+    WIDGETS.with(|w| {
+        if let Some(ref wg) = *w.borrow() {
+            animate_height(
+                &wg.container,
+                &wg.scroll,
+                &wg.section_label,
+                &wg.status_bar,
+                cfg.base.height,
+                cfg.search_height,
+                cfg.animation_duration,
+                cfg.animation_easing,
+                false,
+            );
+        }
+    });
 }
 
 pub fn activate(app: &Application) {
@@ -47,6 +171,9 @@ pub fn activate(app: &Application) {
     if cfg.vim_mode {
         set_vim_mode(VimMode::Normal);
     }
+
+    // Reset to collapsed state
+    set_expanded(false);
 
     if let Some(win) = app.active_window() {
         if win.is_visible() {
@@ -60,12 +187,22 @@ pub fn activate(app: &Application) {
                 set_vim_mode(VimMode::Normal);
             }
 
+            // Reset to collapsed
+            set_expanded(false);
+
             WIDGETS.with(|w| {
                 if let Some(ref wg) = *w.borrow() {
                     let ents = wg.entries.borrow();
-                    let n = populate_list(&wg.listbox, &ents, "", cfg.calculator);
-                    wg.status.set_text(&format!("{} apps", n));
+                    let _ = populate_list(&wg.listbox, &ents, "", cfg.calculator);
+                    wg.status.set_text(&format!("{} apps", ents.len()));
                     wg.search.set_text("");
+
+                    // Start collapsed
+                    wg.container
+                        .set_size_request(cfg.base.width, cfg.search_height);
+                    wg.scroll.set_visible(false);
+                    wg.section_label.set_visible(false);
+                    wg.status_bar.set_visible(false);
 
                     if cfg.vim_mode {
                         update_mode_display(&wg.mode_label, VimMode::Normal);
@@ -103,20 +240,21 @@ pub fn activate(app: &Application) {
     let window = ApplicationWindow::builder()
         .application(app)
         .default_width(cfg.base.width)
-        .default_height(cfg.base.height)
+        .default_height(cfg.search_height) // Start with collapsed height
         .resizable(false)
         .build();
 
     apply_layer_shell(&window, &cfg.base, APP_NAME);
-    window.set_default_size(cfg.base.width, cfg.base.height);
+    window.set_default_size(cfg.base.width, cfg.search_height);
 
     let container = GtkBox::new(Orientation::Vertical, 0);
     container.add_css_class("launch-container");
-    container.set_size_request(cfg.base.width, cfg.base.height);
+    container.add_css_class("collapsed"); // Start collapsed
+    container.set_size_request(cfg.base.width, cfg.search_height);
 
-    // header
-    let header = GtkBox::new(Orientation::Vertical, 0);
-    header.add_css_class("launch-header");
+    // search wrapper - for collapsed state padding
+    let search_wrapper = GtkBox::new(Orientation::Vertical, 0);
+    search_wrapper.add_css_class("launch-search-wrapper");
 
     let search_row = GtkBox::new(Orientation::Horizontal, 8);
     search_row.add_css_class("launch-search-row");
@@ -135,19 +273,23 @@ pub fn activate(app: &Application) {
     hint_text.add_css_class("launch-hint-text");
     hint_box.append(&hint_text);
     search_row.append(&hint_box);
-    header.append(&search_row);
+    search_wrapper.append(&search_row);
 
+    container.append(&search_wrapper);
+
+    // expandable content
     let section_label = Label::new(Some("Applications"));
     section_label.set_xalign(0.0);
     section_label.add_css_class("launch-section-label");
-    header.append(&section_label);
-    container.append(&header);
+    section_label.set_visible(false); // Start hidden
+    container.append(&section_label);
 
     // list
     let scroll = ScrolledWindow::new();
     scroll.set_vexpand(true);
     scroll.set_hscrollbar_policy(gtk4::PolicyType::Never);
     scroll.set_vscrollbar_policy(gtk4::PolicyType::Automatic);
+    scroll.set_visible(false); // Start hidden
     let listbox = ListBox::new();
     listbox.add_css_class("launch-list");
     listbox.set_selection_mode(gtk4::SelectionMode::Single);
@@ -158,6 +300,7 @@ pub fn activate(app: &Application) {
     // status bar
     let status_bar = GtkBox::new(Orientation::Horizontal, 0);
     status_bar.add_css_class("launch-status-bar");
+    status_bar.set_visible(false); // Start hidden
 
     let mode_label = Label::new(Some(""));
     mode_label.add_css_class("vim-mode-indicator");
@@ -206,7 +349,7 @@ pub fn activate(app: &Application) {
     container.append(&status_bar);
     window.set_child(Some(&container));
 
-    // search handler
+    // search handler - handles expand/collapse
     let entries_f = entries.clone();
     let listbox_f = listbox.clone();
     let status_f = status.clone();
@@ -215,10 +358,18 @@ pub fn activate(app: &Application) {
         let q = s.text().to_string();
         let ents = entries_f.borrow();
         let n = populate_list(&listbox_f, &ents, &q, cfg_f.calculator);
+
         if q.starts_with('=') {
             status_f.set_text("Calculator");
         } else {
             status_f.set_text(&format!("{} apps", n));
+        }
+
+        // Expand/collapse based on search text
+        if !q.is_empty() && !is_expanded() {
+            expand(&cfg_f);
+        } else if q.is_empty() && is_expanded() {
+            collapse(&cfg_f);
         }
     });
 
@@ -230,6 +381,7 @@ pub fn activate(app: &Application) {
     let wk = window.clone();
     let sk = search.clone();
     let mode_k = mode_label.clone();
+    let cfg_k = cfg.clone();
 
     key_ctrl.connect_key_pressed(move |_, key, _, mods| {
         let vim_enabled = CONFIG.with(|c| c.borrow().vim_mode);
@@ -262,6 +414,10 @@ pub fn activate(app: &Application) {
                                 set_vim_mode(VimMode::Insert);
                                 update_mode_display(&mode_k, VimMode::Insert);
                                 sk.grab_focus();
+
+                                // Expand when entering insert mode
+                                expand(&cfg_k);
+
                                 let key_char = common::keys::key_to_char(key);
                                 if let Some(c) = key_char {
                                     if c == 'A' || c == 'a' {
@@ -336,8 +492,14 @@ pub fn activate(app: &Application) {
                             set_vim_mode(VimMode::Normal);
                             update_mode_display(&mode_k, VimMode::Normal);
                             lk.grab_focus();
+
+                            // Collapse when exiting insert mode if search is empty
+                            if sk.text().is_empty() {
+                                collapse(&cfg_k);
+                            }
                         }
-                    } // Enter in insert mode -> select
+                    }
+                    // Enter in insert mode -> select
                     if key == gdk4::Key::Return {
                         let q = sk.text().to_string();
 
@@ -489,8 +651,12 @@ pub fn activate(app: &Application) {
         *w.borrow_mut() = Some(AppWidgets {
             search: search.clone(),
             listbox: listbox.clone(),
+            scroll: scroll.clone(),
+            section_label: section_label.clone(),
+            status_bar: status_bar.clone(),
             status: status.clone(),
             mode_label: mode_label.clone(),
+            container: container.clone(),
             entries: entries.clone(),
         });
     });
@@ -513,8 +679,8 @@ pub fn activate(app: &Application) {
     log(
         APP_NAME,
         &format!(
-            "daemon started ({}x{}, anchor={:?}, vim={})",
-            cfg.base.width, cfg.base.height, cfg.base.anchor, cfg.vim_mode
+            "daemon started ({}x{}, collapsed={}, anchor={:?}, vim={})",
+            cfg.base.width, cfg.base.height, cfg.search_height, cfg.base.anchor, cfg.vim_mode
         ),
     );
 }
@@ -538,12 +704,22 @@ pub fn setup_signals(app: &Application) {
                         set_vim_mode(VimMode::Normal);
                     }
 
+                    // Reset to collapsed
+                    set_expanded(false);
+
                     WIDGETS.with(|w| {
                         if let Some(ref wg) = *w.borrow() {
                             let ents = wg.entries.borrow();
-                            let n = populate_list(&wg.listbox, &ents, "", cfg.calculator);
-                            wg.status.set_text(&format!("{} apps", n));
+                            let _ = populate_list(&wg.listbox, &ents, "", cfg.calculator);
+                            wg.status.set_text(&format!("{} apps", ents.len()));
                             wg.search.set_text("");
+
+                            // Start collapsed
+                            wg.container
+                                .set_size_request(cfg.base.width, cfg.search_height);
+                            wg.scroll.set_visible(false);
+                            wg.section_label.set_visible(false);
+                            wg.status_bar.set_visible(false);
 
                             if cfg.vim_mode {
                                 update_mode_display(&wg.mode_label, VimMode::Normal);

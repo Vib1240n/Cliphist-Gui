@@ -2,9 +2,11 @@
 # launch-gui configuration
 # Location: ~/.config/launch-gui/config
 # ===========================================================
+
 [window]
 width = 580
 height = 400
+search_height = 70
 anchor = center
 margin_top = 0
 margin_bottom = 0
@@ -18,6 +20,15 @@ theme = ~/.config/launch-gui/style.css
 terminal = kitty
 calculator = true
 vim_mode = false
+animation_duration = 200
+animation_easing = ease-out
+
+# Animation easing options:
+#   linear      - constant speed
+#   ease-in     - slow start, fast end
+#   ease-out    - fast start, slow end (default)
+#   ease-in-out - slow start and end
+#   bounce      - overshoot and settle
 
 [keybinds]
 select = Return Enter

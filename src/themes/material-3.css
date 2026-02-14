@@ -1,130 +1,194 @@
-window {
+/* Material 3 Theme */
+window,
+window.background {
   background-color: transparent;
 }
+
 .launch-container,
 .clip-container {
   background-color: alpha(#1c1b1f, 0.92);
-  border-radius: 28px;
-  border: 1px solid alpha(#938f99, 0.2);
+  border: 1px solid alpha(#49454f, 0.4);
 }
+
+.launch-container.collapsed {
+  border-radius: 28px;
+}
+
+.launch-container.expanded,
+.clip-container {
+  border-radius: 16px;
+}
+
+.launch-search-wrapper {
+  padding: 12px 16px;
+}
+
+.launch-container.expanded .launch-search-wrapper {
+  padding: 16px 20px 8px 20px;
+}
+
 .launch-header,
 .clip-header {
   padding: 20px 24px 4px 24px;
 }
+
 .launch-search-row,
 .clip-search-row {
   margin-bottom: 4px;
 }
+
 .launch-search,
 .clip-search {
-  background-color: alpha(#2b2930, 0.8);
-  border: none;
-  border-radius: 28px;
+  background-color: alpha(#2b2930, 0.6);
+  border: 1px solid alpha(#49454f, 0.3);
+  border-radius: 12px;
   padding: 12px 16px;
   color: #e6e1e5;
   font-size: 15px;
   min-height: 22px;
 }
+
+.launch-container.collapsed .launch-search {
+  border-radius: 16px;
+}
+
 .launch-search:focus,
 .clip-search:focus {
-  background-color: alpha(#4a4458, 0.6);
+  border-color: alpha(#d0bcff, 0.6);
 }
+
 .launch-esc-badge,
 .clip-esc-badge {
-  background-color: alpha(#4a4458, 0.6);
-  border-radius: 8px;
-  padding: 4px 10px;
+  background-color: alpha(#49454f, 0.5);
+  border-radius: 6px;
+  padding: 3px 8px;
   font-size: 11px;
-  font-weight: 500;
-  color: #cac4d0;
+  font-weight: 600;
+  color: alpha(#e6e1e5, 0.6);
 }
+
 .launch-hint-text,
 .clip-hint-text {
-  color: alpha(#cac4d0, 0.6);
+  color: alpha(#e6e1e5, 0.4);
   font-size: 11px;
 }
+
 .launch-section-label,
 .clip-section-label {
-  color: #cac4d0;
+  color: alpha(#e6e1e5, 0.6);
   font-size: 12px;
-  font-weight: 500;
-  padding: 8px 4px 4px 4px;
+  font-weight: 600;
+  padding: 8px 24px 4px 24px;
 }
+
 .launch-list,
 .clip-list {
   background-color: transparent;
+  padding: 0 8px;
 }
+
 .launch-list row,
 .clip-list row {
   background-color: transparent;
-  border-radius: 16px;
-  margin: 2px 8px;
-  padding: 12px 16px;
+  border-radius: 12px;
+  margin: 1px 0;
+  padding: 10px 14px;
 }
+
 .launch-list row:hover,
 .clip-list row:hover {
   background-color: alpha(#d0bcff, 0.08);
 }
+
 .launch-list row:selected,
 .clip-list row:selected {
-  background-color: alpha(#d0bcff, 0.16);
+  background-color: alpha(#d0bcff, 0.15);
 }
+
 .launch-icon-box,
 .clip-text-icon,
 .clip-thumb-frame {
-  background-color: alpha(#4a4458, 0.6);
-  border-radius: 12px;
+  background-color: alpha(#2b2930, 0.8);
+  border-radius: 10px;
   min-width: 48px;
   min-height: 48px;
 }
+
 .launch-icon-fallback,
 .clip-text-icon-label {
   color: #d0bcff;
   font-size: 20px;
-  font-weight: 500;
+  font-weight: bold;
 }
+
 .launch-title,
 .clip-title {
   color: #e6e1e5;
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
 }
+
 .launch-subtitle,
 .clip-subtitle {
-  color: #cac4d0;
+  color: alpha(#e6e1e5, 0.5);
   font-size: 11px;
 }
+
 .launch-calc-result {
-  color: #d0bcff;
+  color: #a8c7fa;
   font-size: 18px;
 }
+
 .clip-badge {
-  color: #cac4d0;
+  color: alpha(#e6e1e5, 0.4);
   font-size: 10px;
-  font-weight: 500;
+  font-weight: 600;
 }
+
 .launch-status-bar,
 .clip-status-bar {
-  padding: 12px 24px;
-  border-top: 1px solid alpha(#938f99, 0.12);
+  padding: 10px 20px;
+  border-top: 1px solid alpha(#49454f, 0.2);
 }
+
 .launch-status-left,
 .clip-status-left {
-  color: #cac4d0;
+  color: alpha(#e6e1e5, 0.4);
   font-size: 11px;
 }
+
 .launch-status-key,
 .clip-status-key {
-  background-color: alpha(#4a4458, 0.6);
-  border-radius: 8px;
-  padding: 2px 8px;
+  background-color: alpha(#49454f, 0.4);
+  border-radius: 4px;
+  padding: 1px 6px;
   font-size: 10px;
-  font-weight: 500;
-  color: #cac4d0;
+  font-weight: 600;
+  color: alpha(#e6e1e5, 0.6);
 }
+
 .launch-status-hint,
 .clip-status-hint {
-  color: #cac4d0;
+  color: alpha(#e6e1e5, 0.4);
   font-size: 10px;
   margin-left: 4px;
+}
+
+.vim-mode-indicator {
+  font-family: monospace;
+  font-weight: bold;
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin-right: 12px;
+}
+
+.vim-mode-normal {
+  background: #d0bcff;
+  color: #1c1b1f;
+}
+
+.vim-mode-insert {
+  background: #a8c7fa;
+  color: #1c1b1f;
 }
