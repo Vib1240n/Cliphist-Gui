@@ -1,9 +1,9 @@
-use std::io::Write;
-use std::path::PathBuf;
-use std::process::Command;
-use std::path::Path;
 use crate::config::APP_NAME;
 use common::css::char_truncate;
+use std::io::Write;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::Command;
 
 const THUMB_SIZE: u32 = 64;
 
