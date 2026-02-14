@@ -339,13 +339,13 @@ pub fn activate(app: &Application) {
                     return glib::Propagation::Stop;
                 }
                 VimMode::Insert => {
-                   if let Some(action) = handle_vim_insert_key(key) {
+                    if let Some(action) = handle_vim_insert_key(key) {
                         if action == VimAction::ExitInsert {
                             set_vim_mode(VimMode::Normal);
                             update_mode_display(&mode_k, VimMode::Normal);
                             lk.grab_focus();
                         }
-                    }                    // Enter in insert mode -> select
+                    } // Enter in insert mode -> select
                     if key == gdk4::Key::Return {
                         if let Some(row) = lk.selected_row() {
                             let ents = ek.borrow();
