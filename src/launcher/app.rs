@@ -55,6 +55,7 @@ fn is_expanded() -> bool {
 }
 
 /// Animate height transition
+#[allow(clippy::too_many_arguments)]
 fn animate_height(
     container: &GtkBox,
     scroll: &ScrolledWindow,
