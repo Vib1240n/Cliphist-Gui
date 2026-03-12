@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use gdk4::prelude::*;
 use gtk4::prelude::*;
@@ -21,8 +22,11 @@ use common::{
 };
 
 use crate::config::{default_css, Config, APP_NAME};
-use crate::entries::{delete_entry, fetch_entries, get_filtered_entry, select_entry, ClipEntry};
-use crate::ui::populate_list;
+use crate::entries::{
+    delete_entry, fetch_entries_fast, generate_thumbnails_background, get_filtered_entry,
+    poll_thumbnail_results, select_entry, update_entry_thumbnail, ClipEntry, ThumbnailResult,
+};
+use crate::ui::{populate_list, update_row_thumbnail};
 
 pub struct AppWidgets {
     pub search: Entry,
@@ -35,6 +39,95 @@ pub struct AppWidgets {
 thread_local! {
     pub static WIDGETS: RefCell<Option<AppWidgets>> = const { RefCell::new(None) };
     pub static CONFIG: RefCell<Config> = RefCell::new(Config::default());
+    pub static THUMB_RESULTS: RefCell<Option<Arc<Mutex<Vec<ThumbnailResult>>>>> = const { RefCell::new(None) };
+    pub static THUMB_POLL_COUNT: RefCell<usize> = const { RefCell::new(0) };
+}
+
+/// Start polling for thumbnail results
+fn start_thumbnail_polling() {
+    // Poll every 50ms for new thumbnails
+    glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+        let should_continue = THUMB_RESULTS.with(|tr| {
+            if let Some(ref results) = *tr.borrow() {
+                let last_count = THUMB_POLL_COUNT.with(|c| *c.borrow());
+                let new_results = poll_thumbnail_results(results, last_count);
+
+                if !new_results.is_empty() {
+                    THUMB_POLL_COUNT.with(|c| {
+                        *c.borrow_mut() += new_results.len();
+                    });
+
+                    // Update entries and UI
+                    WIDGETS.with(|w| {
+                        if let Some(ref wg) = *w.borrow() {
+                            let mut ents = wg.entries.borrow_mut();
+                            for result in &new_results {
+                                if let Some(ref path) = result.path {
+                                    update_entry_thumbnail(&mut ents, &result.id, path.clone());
+                                    update_row_thumbnail(&wg.listbox, &result.id, path);
+                                }
+                            }
+                        }
+                    });
+                }
+
+                // Check if we might have more results coming
+                if let Ok(r) = results.lock() {
+                    // Continue polling if there might be more
+                    // Stop after 10 seconds of no new results or if all done
+                    r.len() < 1000 // Arbitrary large number - keep polling
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        });
+
+        if should_continue {
+            glib::ControlFlow::Continue
+        } else {
+            // Clean up
+            THUMB_RESULTS.with(|tr| *tr.borrow_mut() = None);
+            THUMB_POLL_COUNT.with(|c| *c.borrow_mut() = 0);
+            glib::ControlFlow::Break
+        }
+    });
+}
+
+/// Refresh entries - called on toggle
+fn refresh_entries(max_items: usize) {
+    // Fast synchronous load first (no thumbnail generation)
+    let entries = fetch_entries_fast(max_items);
+    let entries_for_thumbs = entries.clone();
+
+    WIDGETS.with(|w| {
+        if let Some(ref wg) = *w.borrow() {
+            let mut ents = wg.entries.borrow_mut();
+            *ents = entries;
+
+            let query = wg.search.text().to_string();
+            let n = populate_list(&wg.listbox, &ents, &query);
+            wg.status.set_text(&format!("{} items", n));
+        }
+    });
+
+    // Check if any entries need thumbnails
+    let needs_thumbs = entries_for_thumbs
+        .iter()
+        .any(|e| e.is_image && e.thumb_path.is_none());
+
+    if needs_thumbs {
+        // Start background thumbnail generation
+        let results = generate_thumbnails_background(entries_for_thumbs);
+
+        // Store results for polling
+        THUMB_RESULTS.with(|tr| *tr.borrow_mut() = Some(results));
+        THUMB_POLL_COUNT.with(|c| *c.borrow_mut() = 0);
+
+        // Start polling
+        start_thumbnail_polling();
+    }
 }
 
 pub fn activate(app: &Application) {
@@ -57,12 +150,11 @@ pub fn activate(app: &Application) {
                 set_vim_mode(VimMode::Normal);
             }
 
+            // Refresh entries (fast + async thumbnails)
+            refresh_entries(cfg.max_items);
+
             WIDGETS.with(|w| {
                 if let Some(ref wg) = *w.borrow() {
-                    let mut ents = wg.entries.borrow_mut();
-                    *ents = fetch_entries(cfg.max_items);
-                    let n = populate_list(&wg.listbox, &ents, "");
-                    wg.status.set_text(&format!("{} items", n));
                     wg.search.set_text("");
 
                     if cfg.vim_mode {
@@ -168,7 +260,7 @@ pub fn activate(app: &Application) {
     }
     status_bar.append(&mode_label);
 
-    let status = Label::new(Some("0 items"));
+    let status = Label::new(Some("Loading..."));
     status.add_css_class("clip-status-left");
     status.set_halign(Align::Start);
     status.set_hexpand(true);
@@ -227,7 +319,6 @@ pub fn activate(app: &Application) {
     let lk = listbox.clone();
     let wk = window.clone();
     let sk = search.clone();
-    let stk = status.clone();
     let mode_k = mode_label.clone();
 
     key_ctrl.connect_key_pressed(move |_, key, _, mods| {
@@ -241,7 +332,6 @@ pub fn activate(app: &Application) {
 
             match current_mode {
                 VimMode::Normal => {
-                    // allow_delete = true for cliphist (dd works)
                     if let Some(action) = handle_vim_normal_key(key, mods, true) {
                         match action {
                             VimAction::Close => {
@@ -269,10 +359,7 @@ pub fn activate(app: &Application) {
                                         delete_entry(&e);
                                     }
                                     drop(ents);
-                                    let mut ents = ek.borrow_mut();
-                                    *ents = fetch_entries(max_items);
-                                    let n = populate_list(&lk, &ents, &sk.text());
-                                    stk.set_text(&format!("{} items", n));
+                                    refresh_entries(max_items);
                                 }
                             }
                             VimAction::EnterInsert => {
@@ -345,7 +432,7 @@ pub fn activate(app: &Application) {
                             update_mode_display(&mode_k, VimMode::Normal);
                             lk.grab_focus();
                         }
-                    } // Enter in insert mode -> select
+                    }
                     if key == gdk4::Key::Return {
                         if let Some(row) = lk.selected_row() {
                             let ents = ek.borrow();
@@ -365,7 +452,6 @@ pub fn activate(app: &Application) {
                 }
             }
         } else {
-            // Non-vim mode
             let action = CONFIG.with(|c| match_action(&c.borrow().base.keybinds, key, mods));
 
             if let Some(action) = action {
@@ -395,10 +481,7 @@ pub fn activate(app: &Application) {
                                 delete_entry(&e);
                             }
                             drop(ents);
-                            let mut ents = ek.borrow_mut();
-                            *ents = fetch_entries(max_items);
-                            let n = populate_list(&lk, &ents, &sk.text());
-                            stk.set_text(&format!("{} items", n));
+                            refresh_entries(max_items);
                         }
                     }
                     Action::ClearSearch => {
@@ -489,12 +572,8 @@ pub fn activate(app: &Application) {
         });
     });
 
-    {
-        let mut ents = entries.borrow_mut();
-        *ents = fetch_entries(cfg.max_items);
-        let n = populate_list(&listbox, &ents, "");
-        status.set_text(&format!("{} items", n));
-    }
+    // Initial fast load
+    refresh_entries(cfg.max_items);
 
     window.present();
 
@@ -532,12 +611,11 @@ pub fn setup_signals(app: &Application) {
                         set_vim_mode(VimMode::Normal);
                     }
 
+                    // Async refresh
+                    refresh_entries(cfg.max_items);
+
                     WIDGETS.with(|w| {
                         if let Some(ref wg) = *w.borrow() {
-                            let mut ents = wg.entries.borrow_mut();
-                            *ents = fetch_entries(cfg.max_items);
-                            let n = populate_list(&wg.listbox, &ents, "");
-                            wg.status.set_text(&format!("{} items", n));
                             wg.search.set_text("");
 
                             if cfg.vim_mode {

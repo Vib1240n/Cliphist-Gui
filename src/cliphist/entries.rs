@@ -1,9 +1,12 @@
 use crate::config::APP_NAME;
 use common::css::char_truncate;
-use std::io::Write;
+use common::logging::log;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 const THUMB_SIZE: u32 = 64;
 
@@ -17,17 +20,32 @@ pub struct ClipEntry {
     pub thumb_path: Option<PathBuf>,
 }
 
+/// Thumbnail generation result
+#[derive(Clone, Debug)]
+pub struct ThumbnailResult {
+    pub id: String,
+    pub path: Option<PathBuf>,
+}
+
 pub fn thumb_cache() -> PathBuf {
     let d = common::paths::cache_dir(APP_NAME).join("thumbs");
     std::fs::create_dir_all(&d).ok();
     d
 }
 
-pub fn fetch_entries(max_items: usize) -> Vec<ClipEntry> {
-    let output = match Command::new("cliphist").arg("list").output() {
+/// Fast synchronous fetch - NO thumbnail generation, just parse cliphist output
+/// Returns entries immediately with thumb_path set only if already cached
+pub fn fetch_entries_fast(max_items: usize) -> Vec<ClipEntry> {
+    let output = match Command::new("cliphist")
+        .arg("list")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
         Ok(o) => o,
         Err(_) => return Vec::new(),
     };
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     let cache = thumb_cache();
 
@@ -45,11 +63,10 @@ pub fn fetch_entries(max_items: usize) -> Vec<ClipEntry> {
             None => (line.to_string(), line.to_string()),
         };
         let is_image = preview.contains("[[ binary data");
+
+        // Only check if thumbnail exists - don't generate
         let thumb_path = if is_image {
             let path = cache.join(format!("{}.png", id));
-            if !path.exists() {
-                generate_thumbnail(&raw_line, &path);
-            }
             if path.exists() {
                 Some(path)
             } else {
@@ -58,6 +75,7 @@ pub fn fetch_entries(max_items: usize) -> Vec<ClipEntry> {
         } else {
             None
         };
+
         ClipEntry {
             raw_line,
             id,
@@ -69,16 +87,18 @@ pub fn fetch_entries(max_items: usize) -> Vec<ClipEntry> {
     .collect()
 }
 
-pub fn generate_thumbnail(raw_line: &str, out_path: &Path) {
+/// Synchronous thumbnail generation - returns true on success
+fn generate_thumbnail_sync(raw_line: &str, out_path: &Path) -> bool {
+    // Decode from cliphist
     let mut child = match Command::new("cliphist")
         .arg("decode")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
     {
         Ok(c) => c,
-        Err(_) => return,
+        Err(_) => return false,
     };
 
     if let Some(mut si) = child.stdin.take() {
@@ -88,12 +108,14 @@ pub fn generate_thumbnail(raw_line: &str, out_path: &Path) {
 
     let out = match child.wait_with_output() {
         Ok(o) => o,
-        Err(_) => return,
+        Err(_) => return false,
     };
+
     if !out.status.success() || out.stdout.is_empty() {
-        return;
+        return false;
     }
 
+    // Resize with imagemagick
     let mut m = match Command::new("magick")
         .args([
             "png:-",
@@ -101,28 +123,90 @@ pub fn generate_thumbnail(raw_line: &str, out_path: &Path) {
             &format!("{}x{}^", THUMB_SIZE * 2, THUMB_SIZE * 2),
             &format!("png:{}", out_path.display()),
         ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
     {
         Ok(c) => c,
-        Err(_) => return,
+        Err(_) => return false,
     };
 
     if let Some(mut si) = m.stdin.take() {
         let _ = si.write_all(&out.stdout);
         drop(si);
     }
-    let _ = m.wait();
+
+    m.wait().map(|s| s.success()).unwrap_or(false)
+}
+
+/// Generate thumbnails for entries in background thread
+/// Returns a shared results vector that gets populated as thumbnails complete
+pub fn generate_thumbnails_background(entries: Vec<ClipEntry>) -> Arc<Mutex<Vec<ThumbnailResult>>> {
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let results_clone = results.clone();
+
+    thread::spawn(move || {
+        let cache = thumb_cache();
+
+        // Collect entries that need thumbnails
+        let needs_thumb: Vec<_> = entries
+            .iter()
+            .filter(|e| e.is_image && e.thumb_path.is_none())
+            .collect();
+
+        if needs_thumb.is_empty() {
+            return;
+        }
+
+        log(
+            APP_NAME,
+            &format!("generating {} thumbnails in background", needs_thumb.len()),
+        );
+
+        for entry in needs_thumb {
+            let path = cache.join(format!("{}.png", entry.id));
+
+            let result = if generate_thumbnail_sync(&entry.raw_line, &path) {
+                ThumbnailResult {
+                    id: entry.id.clone(),
+                    path: Some(path),
+                }
+            } else {
+                ThumbnailResult {
+                    id: entry.id.clone(),
+                    path: None,
+                }
+            };
+
+            if let Ok(mut r) = results_clone.lock() {
+                r.push(result);
+            }
+        }
+    });
+
+    results
+}
+
+/// Poll for completed thumbnails - returns new results since last poll
+pub fn poll_thumbnail_results(
+    results: &Arc<Mutex<Vec<ThumbnailResult>>>,
+    last_count: usize,
+) -> Vec<ThumbnailResult> {
+    if let Ok(r) = results.lock() {
+        if r.len() > last_count {
+            return r[last_count..].to_vec();
+        }
+    }
+    Vec::new()
 }
 
 pub fn select_entry(entry: &ClipEntry, notify: bool) {
     let mut dec = Command::new("cliphist")
         .arg("decode")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .expect("cliphist decode failed");
 
@@ -140,7 +224,7 @@ pub fn select_entry(entry: &ClipEntry, notify: bool) {
             };
             let mut wl = Command::new("wl-copy")
                 .args(["--type", mime])
-                .stdin(std::process::Stdio::piped())
+                .stdin(Stdio::piped())
                 .spawn()
                 .expect("wl-copy failed");
             if let Some(mut si) = wl.stdin.take() {
@@ -166,7 +250,7 @@ pub fn select_entry(entry: &ClipEntry, notify: bool) {
 pub fn delete_entry(entry: &ClipEntry) {
     if let Ok(mut c) = Command::new("cliphist")
         .arg("delete")
-        .stdin(std::process::Stdio::piped())
+        .stdin(Stdio::piped())
         .spawn()
     {
         if let Some(mut si) = c.stdin.take() {
@@ -229,4 +313,11 @@ pub fn get_filtered_entry(entries: &[ClipEntry], query: &str, idx: usize) -> Opt
             .collect()
     };
     filtered.get(idx).map(|e| (*e).clone())
+}
+
+/// Update thumbnail path for an entry by ID
+pub fn update_entry_thumbnail(entries: &mut [ClipEntry], id: &str, path: PathBuf) {
+    if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+        entry.thumb_path = Some(path);
+    }
 }

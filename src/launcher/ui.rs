@@ -45,7 +45,7 @@ pub fn build_row(entry: &DesktopEntry) -> ListBoxRow {
     icon_box.set_halign(Align::Center);
     icon_box.add_css_class("launch-icon-box");
 
-    if let Some(img) = load_icon(&entry.icon, 32) {
+    if let Some(img) = load_icon(&entry.icon, 48) {
         img.set_valign(Align::Center);
         img.set_halign(Align::Center);
         icon_box.append(&img);
