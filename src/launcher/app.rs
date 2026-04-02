@@ -44,7 +44,6 @@ thread_local! {
     pub static WIDGETS: RefCell<Option<AppWidgets>> = const { RefCell::new(None) };
     pub static CONFIG: RefCell<Config> = RefCell::new(Config::default());
     pub static EXPANDED: RefCell<bool> = const { RefCell::new(false) };
-    pub static ANIMATION_GEN: RefCell<u64> = const { RefCell::new(0) };
 }
 
 fn set_expanded(expanded: bool) {
@@ -53,18 +52,6 @@ fn set_expanded(expanded: bool) {
 
 fn is_expanded() -> bool {
     EXPANDED.with(|e| *e.borrow())
-}
-
-fn next_animation_gen() -> u64 {
-    ANIMATION_GEN.with(|g| {
-        let mut gen = g.borrow_mut();
-        *gen = gen.wrapping_add(1);
-        *gen
-    })
-}
-
-fn current_animation_gen() -> u64 {
-    ANIMATION_GEN.with(|g| *g.borrow())
 }
 
 /// Animate height transition
@@ -80,10 +67,6 @@ fn animate_height(
     easing: Easing,
     expanding: bool,
 ) {
-    // Get a new generation for this animation - any previous animation callbacks
-    // will see their generation is stale and stop
-    let gen = next_animation_gen();
-
     let steps = 20;
     let step_ms = duration_ms / steps;
 
@@ -109,11 +92,6 @@ fn animate_height(
     let width = container.width();
 
     glib::timeout_add_local(std::time::Duration::from_millis(step_ms), move || {
-        // Check if this animation is still current - if not, stop it
-        if current_animation_gen() != gen {
-            return glib::ControlFlow::Break;
-        }
-
         let s = step_clone.get() + 1;
         step_clone.set(s);
 
@@ -127,8 +105,7 @@ fn animate_height(
             container.set_size_request(width, to_height);
 
             // Hide elements after collapse animation completes
-            // Only do this if we're still the current animation
-            if !expanding && current_animation_gen() == gen {
+            if !expanding {
                 scroll.set_visible(false);
                 section_label.set_visible(false);
                 status_bar.set_visible(false);
@@ -215,9 +192,7 @@ pub fn activate(app: &Application) {
 
             WIDGETS.with(|w| {
                 if let Some(ref wg) = *w.borrow() {
-                    // let ents = wg.entries.borrow();
-                    let mut ents = wg.entries.borrow_mut();
-                    *ents = load_entries();
+                    let ents = wg.entries.borrow();
                     let _ = populate_list(&wg.listbox, &ents, "", cfg.calculator);
                     wg.status.set_text(&format!("{} apps", ents.len()));
                     wg.search.set_text("");
@@ -381,15 +356,6 @@ pub fn activate(app: &Application) {
     let cfg_f = cfg.clone();
     search.connect_changed(move |s| {
         let q = s.text().to_string();
-
-        // Expand/collapse based on search text - do this BEFORE populating
-        // so the scroll window is visible when we add items
-        if !q.is_empty() && !is_expanded() {
-            expand(&cfg_f);
-        } else if q.is_empty() && is_expanded() {
-            collapse(&cfg_f);
-        }
-
         let ents = entries_f.borrow();
         let n = populate_list(&listbox_f, &ents, &q, cfg_f.calculator);
 
@@ -397,6 +363,13 @@ pub fn activate(app: &Application) {
             status_f.set_text("Calculator");
         } else {
             status_f.set_text(&format!("{} apps", n));
+        }
+
+        // Expand/collapse based on search text
+        if !q.is_empty() && !is_expanded() {
+            expand(&cfg_f);
+        } else if q.is_empty() && is_expanded() {
+            collapse(&cfg_f);
         }
     });
 
@@ -420,7 +393,7 @@ pub fn activate(app: &Application) {
 
             match current_mode {
                 VimMode::Normal => {
-                    if let Some(action) = handle_vim_normal_key(key, mods, false) {
+                    if let Some(action) = handle_vim_normal_key(key, mods, false, false) {
                         match action {
                             VimAction::Close => {
                                 wk.set_visible(false);

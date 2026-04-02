@@ -21,6 +21,9 @@ pub enum VimAction {
     HalfPageUp,
     Select,
     Delete,
+    Pin,
+    Unpin,
+    TabSwitch,
 }
 
 pub fn set_vim_mode(mode: VimMode) {
@@ -50,12 +53,15 @@ pub fn update_mode_display(label: &Label, mode: VimMode) {
 /// Handle vim key press in Normal mode
 /// Returns Some(VimAction) if handled, None if not
 /// `allow_delete` enables dd sequence (for cliphist)
+/// `allow_pin` enables p/u for pin/unpin (for cliphist)
 pub fn handle_vim_normal_key(
     key: gdk4::Key,
     mods: gdk4::ModifierType,
     allow_delete: bool,
+    allow_pin: bool,
 ) -> Option<VimAction> {
     let key_char = key_to_char(key);
+
     // Escape -> close
     if key == gdk4::Key::Escape {
         return Some(VimAction::Close);
@@ -64,6 +70,21 @@ pub fn handle_vim_normal_key(
     if key == gdk4::Key::Return {
         return Some(VimAction::Select);
     }
+    // Arrow keys for navigation
+    if key == gdk4::Key::Down {
+        LAST_KEY.with(|k| *k.borrow_mut() = None);
+        return Some(VimAction::Down);
+    }
+    if key == gdk4::Key::Up {
+        LAST_KEY.with(|k| *k.borrow_mut() = None);
+        return Some(VimAction::Up);
+    }
+    // Tab for switching tabs (only in cliphist with allow_pin)
+    if key == gdk4::Key::Tab && allow_pin {
+        LAST_KEY.with(|k| *k.borrow_mut() = None);
+        return Some(VimAction::TabSwitch);
+    }
+
     // Check for vim keys
     if let Some(c) = key_char {
         match c {
@@ -101,6 +122,14 @@ pub fn handle_vim_normal_key(
                     LAST_KEY.with(|k| *k.borrow_mut() = Some('d'));
                     return None;
                 }
+            }
+            'p' if allow_pin => {
+                LAST_KEY.with(|k| *k.borrow_mut() = None);
+                return Some(VimAction::Pin);
+            }
+            'u' if allow_pin && !mods.contains(gdk4::ModifierType::CONTROL_MASK) => {
+                LAST_KEY.with(|k| *k.borrow_mut() = None);
+                return Some(VimAction::Unpin);
             }
             _ => {
                 LAST_KEY.with(|k| *k.borrow_mut() = None);

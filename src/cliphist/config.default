@@ -15,10 +15,14 @@ max_items = 0
 close_on_select = true
 notify_on_copy = false
 vim_mode = false
+max_pinned = 20
+pin_icon = default
 
 [keybinds]
 select = Return Enter
 delete = Delete
+pin = p Ctrl+p
+unpin = u Ctrl+Shift+u
 clear_search = Ctrl+u
 close = Escape
 next = Down Tab
@@ -27,4 +31,3 @@ page_down = Page_Down
 page_up = Page_Up
 first = Home
 last = End
-

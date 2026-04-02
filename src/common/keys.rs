@@ -12,6 +12,9 @@ pub enum Action {
     PageUp,
     First,
     Last,
+    Pin,
+    Unpin,
+    TabSwitch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -39,6 +42,9 @@ pub fn parse_action(s: &str) -> Option<Action> {
         "page_up" => Some(Action::PageUp),
         "first" => Some(Action::First),
         "last" => Some(Action::Last),
+        "pin" => Some(Action::Pin),
+        "unpin" => Some(Action::Unpin),
+        "tab_switch" => Some(Action::TabSwitch),
         _ => None,
     }
 }
