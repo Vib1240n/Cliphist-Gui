@@ -1,6 +1,7 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::process::Command;
 use std::rc::Rc;
+use std::time::Instant;
 
 use gdk4::prelude::*;
 use gtk4::prelude::*;
@@ -10,7 +11,6 @@ use gtk4::{
 };
 
 use common::{
-    config::Easing,
     css::load_css,
     keys::match_action,
     layer::{apply_layer_shell, update_cursor_position},
@@ -37,6 +37,7 @@ pub struct AppWidgets {
     pub status: Label,
     pub mode_label: Label,
     pub container: GtkBox,
+    pub window: ApplicationWindow,
     pub entries: Rc<RefCell<Vec<DesktopEntry>>>,
 }
 
@@ -44,6 +45,7 @@ thread_local! {
     pub static WIDGETS: RefCell<Option<AppWidgets>> = const { RefCell::new(None) };
     pub static CONFIG: RefCell<Config> = RefCell::new(Config::default());
     pub static EXPANDED: RefCell<bool> = const { RefCell::new(false) };
+    pub static ANIM_GEN: Cell<u64> = const { Cell::new(0) };
 }
 
 fn set_expanded(expanded: bool) {
@@ -54,23 +56,37 @@ fn is_expanded() -> bool {
     EXPANDED.with(|e| *e.borrow())
 }
 
-/// Animate height transition
-#[allow(clippy::too_many_arguments)]
+/// Spring easing: overshoots slightly then settles. t in [0,1].
+fn spring(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (-6.0 * t).exp() * ((1.0 - t * t).sqrt().max(0.0) * std::f64::consts::PI * 3.5).cos()
+}
+
+/// Ease-out cubic for collapse (no bounce on close).
+fn ease_out(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
+
+/// Smooth, frame-rate-independent height animation.
+/// Uses wall-clock time and a generation counter to cancel stale animations.
 fn animate_height(
     container: &GtkBox,
     scroll: &ScrolledWindow,
     section_label: &Label,
     status_bar: &GtkBox,
+    window: &ApplicationWindow,
     from_height: i32,
     to_height: i32,
     duration_ms: u64,
-    easing: Easing,
     expanding: bool,
 ) {
-    let steps = 20;
-    let step_ms = duration_ms / steps;
+    let gen = ANIM_GEN.with(|g| {
+        let next = g.get() + 1;
+        g.set(next);
+        next
+    });
 
-    // Update CSS classes immediately
     if expanding {
         container.remove_css_class("collapsed");
         container.add_css_class("expanded");
@@ -86,38 +102,52 @@ fn animate_height(
     let scroll = scroll.clone();
     let section_label = section_label.clone();
     let status_bar = status_bar.clone();
-    let step = Rc::new(std::cell::Cell::new(0u64));
-    let step_clone = step.clone();
+    let window = window.clone();
+    let start = Instant::now();
+    let duration = std::time::Duration::from_millis(duration_ms);
 
-    let width = container.width();
+    // add_tick_callback fires every frame in sync with the frame clock (vsync).
+    container.add_tick_callback(move |widget, _clock| {
+        // Stale animation — bail.
+        if ANIM_GEN.with(|g| g.get()) != gen {
+            return glib::ControlFlow::Break;
+        }
 
-    glib::timeout_add_local(std::time::Duration::from_millis(step_ms), move || {
-        let s = step_clone.get() + 1;
-        step_clone.set(s);
+        let elapsed = start.elapsed();
+        let t = (elapsed.as_secs_f64() / duration.as_secs_f64()).min(1.0);
+        let eased = if expanding { spring(t) } else { ease_out(t) };
 
-        let t = s as f64 / steps as f64;
-        let eased = easing.apply(t);
         let current = from_height as f64 + (to_height - from_height) as f64 * eased;
+        let h = current.round() as i32;
 
-        container.set_size_request(width, current as i32);
+        let w = {
+            let aw = widget.allocated_width();
+            if aw > 1 {
+                aw
+            } else {
+                widget.width_request()
+            }
+        };
 
-        if s >= steps {
-            container.set_size_request(width, to_height);
+        widget.set_size_request(w, h);
+        window.set_default_size(w, h);
 
-            // Hide elements after collapse animation completes
+        if t >= 1.0 {
+            widget.set_size_request(w, to_height);
+            window.set_default_size(w, to_height);
+
             if !expanding {
                 scroll.set_visible(false);
                 section_label.set_visible(false);
                 status_bar.set_visible(false);
             }
 
-            glib::ControlFlow::Break
-        } else {
-            glib::ControlFlow::Continue
+            return glib::ControlFlow::Break;
         }
+
+        glib::ControlFlow::Continue
     });
 }
-
 fn expand(cfg: &Config) {
     if is_expanded() {
         return;
@@ -131,10 +161,10 @@ fn expand(cfg: &Config) {
                 &wg.scroll,
                 &wg.section_label,
                 &wg.status_bar,
+                &wg.window,
                 cfg.search_height,
                 cfg.base.height,
                 cfg.animation_duration,
-                cfg.animation_easing,
                 true,
             );
         }
@@ -154,10 +184,10 @@ fn collapse(cfg: &Config) {
                 &wg.scroll,
                 &wg.section_label,
                 &wg.status_bar,
+                &wg.window,
                 cfg.base.height,
                 cfg.search_height,
                 cfg.animation_duration,
-                cfg.animation_easing,
                 false,
             );
         }
@@ -240,7 +270,7 @@ pub fn activate(app: &Application) {
     let window = ApplicationWindow::builder()
         .application(app)
         .default_width(cfg.base.width)
-        .default_height(cfg.search_height) // Start with collapsed height
+        .default_height(cfg.search_height)
         .resizable(false)
         .build();
 
@@ -249,10 +279,9 @@ pub fn activate(app: &Application) {
 
     let container = GtkBox::new(Orientation::Vertical, 0);
     container.add_css_class("launch-container");
-    container.add_css_class("collapsed"); // Start collapsed
+    container.add_css_class("collapsed");
     container.set_size_request(cfg.base.width, cfg.search_height);
 
-    // search wrapper - for collapsed state padding
     let search_wrapper = GtkBox::new(Orientation::Vertical, 0);
     search_wrapper.add_css_class("launch-search-wrapper");
 
@@ -277,19 +306,17 @@ pub fn activate(app: &Application) {
 
     container.append(&search_wrapper);
 
-    // expandable content
     let section_label = Label::new(Some("Applications"));
     section_label.set_xalign(0.0);
     section_label.add_css_class("launch-section-label");
-    section_label.set_visible(false); // Start hidden
+    section_label.set_visible(false);
     container.append(&section_label);
 
-    // list
     let scroll = ScrolledWindow::new();
     scroll.set_vexpand(true);
     scroll.set_hscrollbar_policy(gtk4::PolicyType::Never);
     scroll.set_vscrollbar_policy(gtk4::PolicyType::Automatic);
-    scroll.set_visible(false); // Start hidden
+    scroll.set_visible(false);
     let listbox = ListBox::new();
     listbox.add_css_class("launch-list");
     listbox.set_selection_mode(gtk4::SelectionMode::Single);
@@ -297,10 +324,9 @@ pub fn activate(app: &Application) {
     container.append(&scroll);
     let scroll_k = scroll.clone();
 
-    // status bar
     let status_bar = GtkBox::new(Orientation::Horizontal, 0);
     status_bar.add_css_class("launch-status-bar");
-    status_bar.set_visible(false); // Start hidden
+    status_bar.set_visible(false);
 
     let mode_label = Label::new(Some(""));
     mode_label.add_css_class("vim-mode-indicator");
@@ -365,7 +391,6 @@ pub fn activate(app: &Application) {
             status_f.set_text(&format!("{} apps", n));
         }
 
-        // Expand/collapse based on search text
         if !q.is_empty() && !is_expanded() {
             expand(&cfg_f);
         } else if q.is_empty() && is_expanded() {
@@ -415,7 +440,6 @@ pub fn activate(app: &Application) {
                                 update_mode_display(&mode_k, VimMode::Insert);
                                 sk.grab_focus();
 
-                                // Expand when entering insert mode
                                 expand(&cfg_k);
 
                                 let key_char = common::keys::key_to_char(key);
@@ -479,7 +503,7 @@ pub fn activate(app: &Application) {
                                     }
                                 }
                             }
-                            VimAction::Delete => {} // Not used in launcher
+                            VimAction::Delete => {}
                             _ => {}
                         }
                         return glib::Propagation::Stop;
@@ -493,13 +517,11 @@ pub fn activate(app: &Application) {
                             update_mode_display(&mode_k, VimMode::Normal);
                             lk.grab_focus();
 
-                            // Collapse when exiting insert mode if search is empty
                             if sk.text().is_empty() {
                                 collapse(&cfg_k);
                             }
                         }
                     }
-                    // Enter in insert mode -> select
                     if key == gdk4::Key::Return {
                         let q = sk.text().to_string();
 
@@ -657,6 +679,7 @@ pub fn activate(app: &Application) {
             status: status.clone(),
             mode_label: mode_label.clone(),
             container: container.clone(),
+            window: window.clone(),
             entries: entries.clone(),
         });
     });
