@@ -1,14 +1,20 @@
-use crate::config::Config;
 use crate::entries::{content_type, parse_image_meta, ClipEntry, PinnedClipEntry};
 use common::css::char_truncate;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Box as GtkBox, DragSource, DropTarget, Label, ListBox, ListBoxRow, Orientation, Overlay,
-    Picture,
+    Align, Box as GtkBox, DragSource, DropTarget, GestureClick, Label, ListBox, ListBoxRow,
+    Orientation, Overlay, Picture,
 };
+use std::path::Path;
 
 const MAX_TEXT_PREVIEW: usize = 120;
 const MAX_SUB_PREVIEW: usize = 60;
+/// Rows actually built per refresh. Matching runs over everything; only the
+/// first N are rendered so search stays instant with a long history.
+const MAX_ROWS: usize = 200;
+
+/// Row name prefix for pinned rows; regular rows are named by cliphist id.
+pub const PINNED_PREFIX: &str = "pinned:";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
@@ -16,351 +22,320 @@ pub enum Tab {
     Pinned,
 }
 
-/// Create pin badge widget
+/// Called after a drag-and-drop reorder: (source hash, target hash)
+pub type MoveFn = fn(String, String);
+
 fn create_pin_badge() -> Label {
-    let badge = Label::new(Some("\u{1F4CC}")); // pushpin emoji
+    let badge = Label::new(Some("\u{1F4CC}")); // pushpin
     badge.add_css_class("clip-pin-badge");
     badge.set_halign(Align::End);
     badge.set_valign(Align::Start);
     badge
 }
 
-/// Create icon box with optional pin badge overlay
-fn create_icon_with_badge(
-    is_image: bool,
-    thumb_path: Option<&std::path::Path>,
-    show_pin: bool,
-) -> gtk4::Widget {
+fn letter_icon(letter: &str, pending: bool) -> GtkBox {
+    let ib = GtkBox::new(Orientation::Vertical, 0);
+    ib.set_size_request(48, 48);
+    ib.set_valign(Align::Center);
+    ib.set_halign(Align::Center);
+    ib.add_css_class("clip-text-icon");
+    if pending {
+        ib.add_css_class("clip-thumb-pending");
+    }
+    let lbl = Label::new(Some(letter));
+    lbl.add_css_class("clip-text-icon-label");
+    lbl.set_valign(Align::Center);
+    lbl.set_halign(Align::Center);
+    lbl.set_vexpand(true);
+    ib.append(&lbl);
+    ib
+}
+
+fn thumb_frame(path: &Path) -> gtk4::Frame {
+    let pic = Picture::for_filename(path);
+    pic.set_size_request(48, 48);
+    pic.add_css_class("clip-thumb");
+    let frame = gtk4::Frame::new(None);
+    frame.set_child(Some(&pic));
+    frame.add_css_class("clip-thumb-frame");
+    frame.set_size_request(48, 48);
+    frame
+}
+
+/// Icon cell. Images whose thumbnail isn't generated yet get a placeholder and
+/// remember the thumbnail path (overlay widget name), so `refresh_thumbnails`
+/// can swap the picture in when the background worker finishes.
+fn create_icon(is_image: bool, thumb_path: Option<&Path>, show_pin: bool) -> gtk4::Widget {
     let overlay = Overlay::new();
-
-    if is_image {
-        if let Some(path) = thumb_path {
-            let pic = Picture::for_filename(path.to_str().unwrap_or(""));
-            pic.set_size_request(48, 48);
-            pic.add_css_class("clip-thumb");
-            let frame = gtk4::Frame::new(None);
-            frame.set_child(Some(&pic));
-            frame.add_css_class("clip-thumb-frame");
-            frame.set_size_request(48, 48);
-            overlay.set_child(Some(&frame));
-        } else {
-            let ib = GtkBox::new(Orientation::Vertical, 0);
-            ib.set_size_request(48, 48);
-            ib.set_valign(Align::Center);
-            ib.set_halign(Align::Center);
-            ib.add_css_class("clip-text-icon");
-            let lbl = Label::new(Some("I"));
-            lbl.add_css_class("clip-text-icon-label");
-            lbl.set_valign(Align::Center);
-            lbl.set_halign(Align::Center);
-            lbl.set_vexpand(true);
-            ib.append(&lbl);
-            overlay.set_child(Some(&ib));
+    match (is_image, thumb_path) {
+        (true, Some(path)) if path.exists() => overlay.set_child(Some(&thumb_frame(path))),
+        (true, Some(path)) => {
+            overlay.set_widget_name(&path.to_string_lossy());
+            overlay.set_child(Some(&letter_icon("I", true)));
         }
-    } else {
-        let ib = GtkBox::new(Orientation::Vertical, 0);
-        ib.set_size_request(48, 48);
-        ib.set_valign(Align::Center);
-        ib.set_halign(Align::Center);
-        ib.add_css_class("clip-text-icon");
-        let lbl = Label::new(Some("T"));
-        lbl.add_css_class("clip-text-icon-label");
-        lbl.set_valign(Align::Center);
-        lbl.set_halign(Align::Center);
-        lbl.set_vexpand(true);
-        ib.append(&lbl);
-        overlay.set_child(Some(&ib));
+        (true, None) => overlay.set_child(Some(&letter_icon("I", false))),
+        (false, _) => overlay.set_child(Some(&letter_icon("T", false))),
     }
-
     if show_pin {
-        let badge = create_pin_badge();
-        overlay.add_overlay(&badge);
+        overlay.add_overlay(&create_pin_badge());
     }
-
     overlay.upcast()
 }
 
-/// Build row for regular clipboard entry, optionally showing pin icon
-pub fn build_row(entry: &ClipEntry, is_pinned: bool, _cfg: &Config) -> ListBoxRow {
+fn text_column(title_text: &str, sub_text: &str) -> GtkBox {
+    let content = GtkBox::new(Orientation::Vertical, 0);
+    content.set_hexpand(true);
+    content.set_valign(Align::Center);
+
+    let title = Label::new(Some(title_text));
+    title.set_xalign(0.0);
+    title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    title.set_max_width_chars(45);
+    title.add_css_class("clip-title");
+    content.append(&title);
+
+    if !sub_text.is_empty() {
+        let sub = Label::new(Some(sub_text));
+        sub.set_xalign(0.0);
+        sub.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        sub.set_max_width_chars(45);
+        sub.add_css_class("clip-subtitle");
+        content.append(&sub);
+    }
+    content
+}
+
+fn type_badge(text: &str, pinned: bool) -> GtkBox {
+    let right = GtkBox::new(Orientation::Vertical, 2);
+    right.set_valign(Align::Start);
+    right.set_halign(Align::End);
+    right.set_margin_top(2);
+    let badge = Label::new(Some(text));
+    badge.set_halign(Align::End);
+    badge.add_css_class("clip-badge");
+    if pinned {
+        badge.add_css_class("clip-badge-pinned");
+    }
+    right.append(&badge);
+    right
+}
+
+/// Regular cliphist entry. Row name = cliphist id (used to find the entry back).
+pub fn build_row(entry: &ClipEntry) -> ListBoxRow {
     let row = ListBoxRow::new();
     row.set_focusable(false);
     row.set_widget_name(&entry.id);
 
     let hbox = GtkBox::new(Orientation::Horizontal, 14);
     hbox.set_valign(Align::Center);
+    hbox.append(&create_icon(entry.is_image, entry.thumb_path.as_deref(), false));
 
-    // Thumbnail or text icon with pin badge overlay
-    let icon = create_icon_with_badge(entry.is_image, entry.thumb_path.as_deref(), is_pinned);
-    hbox.append(&icon);
-
-    let content = GtkBox::new(Orientation::Vertical, 0);
-    content.set_hexpand(true);
-    content.set_valign(Align::Center);
-
-    let ctype = content_type(entry);
-    let title_text = if entry.is_image {
-        "Image".to_string()
+    let (title, sub) = if entry.is_image {
+        ("Image".to_string(), parse_image_meta(&entry.preview).unwrap_or_default())
     } else {
-        char_truncate(&entry.preview, MAX_TEXT_PREVIEW)
+        (
+            char_truncate(&entry.preview, MAX_TEXT_PREVIEW),
+            char_truncate(&entry.preview, MAX_SUB_PREVIEW),
+        )
     };
-
-    let title = Label::new(Some(&title_text));
-    title.set_xalign(0.0);
-    title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    title.set_max_width_chars(45);
-    title.add_css_class("clip-title");
-    content.append(&title);
-
-    let sub_text = if entry.is_image {
-        parse_image_meta(&entry.preview).unwrap_or_default()
-    } else {
-        char_truncate(&entry.preview, MAX_SUB_PREVIEW)
-    };
-
-    if !sub_text.is_empty() {
-        let sub = Label::new(Some(&sub_text));
-        sub.set_xalign(0.0);
-        sub.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        sub.set_max_width_chars(45);
-        sub.add_css_class("clip-subtitle");
-        content.append(&sub);
-    }
-
-    hbox.append(&content);
-
-    let right = GtkBox::new(Orientation::Vertical, 2);
-    right.set_valign(Align::Start);
-    right.set_halign(Align::End);
-    right.set_margin_top(2);
-    let badge = Label::new(Some(ctype));
-    badge.set_halign(Align::End);
-    badge.add_css_class("clip-badge");
-    right.append(&badge);
-    hbox.append(&right);
+    hbox.append(&text_column(&title, &sub));
+    hbox.append(&type_badge(content_type(entry), false));
 
     row.set_child(Some(&hbox));
     row
 }
 
-/// Build row for pinned entry (from storage, not cliphist)
-pub fn build_pinned_row(entry: &PinnedClipEntry, _cfg: &Config) -> ListBoxRow {
+/// Pinned entry (from pinned storage). Row name = "pinned:<hash>".
+pub fn build_pinned_row(entry: &PinnedClipEntry) -> ListBoxRow {
     let row = ListBoxRow::new();
     row.set_focusable(false);
-    row.set_widget_name(&format!("pinned:{}", entry.meta.hash));
+    row.set_widget_name(&format!("{PINNED_PREFIX}{}", entry.meta.hash));
 
+    let is_image = entry.meta.is_image();
     let hbox = GtkBox::new(Orientation::Horizontal, 14);
     hbox.set_valign(Align::Center);
+    hbox.append(&create_icon(is_image, entry.thumb_path.as_deref(), true));
 
-    // Thumbnail or text icon with pin badge (always shown for pinned)
-    let is_image = entry.meta.content_type == "image";
-    let icon = create_icon_with_badge(
-        is_image,
-        entry.thumb_path.as_deref(),
-        true, // always show pin badge
-    );
-    hbox.append(&icon);
-
-    let content = GtkBox::new(Orientation::Vertical, 0);
-    content.set_hexpand(true);
-    content.set_valign(Align::Center);
-
-    let title_text = if is_image {
-        "Image".to_string()
+    let (title, sub) = if is_image {
+        ("Image".to_string(), parse_image_meta(&entry.meta.preview).unwrap_or_default())
     } else {
-        char_truncate(&entry.meta.preview, MAX_TEXT_PREVIEW)
+        (
+            char_truncate(&entry.meta.preview, MAX_TEXT_PREVIEW),
+            char_truncate(&entry.meta.preview, MAX_SUB_PREVIEW),
+        )
     };
-
-    let title = Label::new(Some(&title_text));
-    title.set_xalign(0.0);
-    title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    title.set_max_width_chars(45);
-    title.add_css_class("clip-title");
-    content.append(&title);
-
-    if !is_image {
-        let sub = Label::new(Some(&char_truncate(&entry.meta.preview, MAX_SUB_PREVIEW)));
-        sub.set_xalign(0.0);
-        sub.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        sub.set_max_width_chars(45);
-        sub.add_css_class("clip-subtitle");
-        content.append(&sub);
-    }
-
-    hbox.append(&content);
-
-    let right = GtkBox::new(Orientation::Vertical, 2);
-    right.set_valign(Align::Start);
-    right.set_halign(Align::End);
-    right.set_margin_top(2);
-    let badge_text = if is_image { "IMAGE" } else { "TEXT" };
-    let badge = Label::new(Some(badge_text));
-    badge.set_halign(Align::End);
-    badge.add_css_class("clip-badge");
-    badge.add_css_class("clip-badge-pinned");
-    right.append(&badge);
-    hbox.append(&right);
+    hbox.append(&text_column(&title, &sub));
+    hbox.append(&type_badge(if is_image { "IMAGE" } else { "TEXT" }, true));
 
     row.set_child(Some(&hbox));
     row
 }
 
-/// Setup drag-and-drop for a pinned row
-pub fn setup_row_drag(row: &ListBoxRow, hash: String) {
-    // Drag source
+/// Drag a pinned row onto another to reorder.
+fn setup_row_drag(row: &ListBoxRow, hash: String, on_move: MoveFn) {
     let drag_source = DragSource::new();
     drag_source.set_actions(gdk4::DragAction::MOVE);
-
     let hash_for_drag = hash.clone();
     drag_source.connect_prepare(move |_, _, _| {
-        let content = gdk4::ContentProvider::for_value(&hash_for_drag.to_value());
-        Some(content)
+        Some(gdk4::ContentProvider::for_value(&hash_for_drag.to_value()))
     });
-
     row.add_controller(drag_source);
 
-    // Drop target
     let drop_target = DropTarget::new(glib::Type::STRING, gdk4::DragAction::MOVE);
-
-    drop_target.connect_drop(move |target, value, _, _| {
-        if let Ok(source_hash) = value.get::<String>() {
-            if source_hash != hash {
-                // Get the listbox and reorder
-                if let Some(row) = target.widget().and_downcast::<ListBoxRow>() {
-                    if let Some(listbox) = row.parent().and_downcast::<ListBox>() {
-                        // Signal that reorder happened - will be handled by app.rs
-                        listbox.emit_by_name::<()>("row-activated", &[&row]);
-                    }
-                }
-            }
+    drop_target.connect_drop(move |_, value, _, _| {
+        let Ok(source) = value.get::<String>() else { return false };
+        if source == hash {
+            return false;
         }
+        let target = hash.clone();
+        // Rebuild the list after the drop handler returns, not inside it
+        glib::idle_add_local_once(move || on_move(source, target));
         true
     });
-
     row.add_controller(drop_target);
 }
 
-/// Populate listbox with recent entries (pinned at top if <= 5 pinned)
+fn clear(listbox: &ListBox) {
+    while let Some(row) = listbox.row_at_index(0) {
+        listbox.remove(&row);
+    }
+}
+
+fn select_first(listbox: &ListBox) {
+    if let Some(first) = listbox.row_at_index(0) {
+        listbox.select_row(Some(&first));
+    }
+}
+
+/// Recent tab. `inline_pinned`: show pins on top (when there are few of them).
+/// Returns the number of matches (may exceed the rows rendered).
 pub fn populate_list(
     listbox: &ListBox,
     entries: &[ClipEntry],
     pinned: &[PinnedClipEntry],
     query: &str,
-    cfg: &Config,
+    inline_pinned: bool,
 ) -> usize {
-    while let Some(row) = listbox.row_at_index(0) {
-        listbox.remove(&row);
-    }
-
+    clear(listbox);
     let q = query.to_lowercase();
-    let mut count = 0;
+    let mut matches = 0;
+    let mut rendered = 0;
 
-    // If <= 5 pinned items, show them at top of recent view
-    if pinned.len() <= 5 {
+    if inline_pinned {
         for p in pinned {
             if q.is_empty() || p.meta.preview.to_lowercase().contains(&q) {
-                let row = build_pinned_row(p, cfg);
-                listbox.append(&row);
-                count += 1;
+                matches += 1;
+                if rendered < MAX_ROWS {
+                    listbox.append(&build_pinned_row(p));
+                    rendered += 1;
+                }
+            }
+        }
+    }
+    for e in entries {
+        if q.is_empty() || e.preview.to_lowercase().contains(&q) {
+            matches += 1;
+            if rendered < MAX_ROWS {
+                listbox.append(&build_row(e));
+                rendered += 1;
             }
         }
     }
 
-    // Add regular entries
-    for e in entries {
-        if q.is_empty() || e.preview.to_lowercase().contains(&q) {
-            let row = build_row(e, false, cfg);
-            listbox.append(&row);
-            count += 1;
-        }
-    }
-
-    if let Some(first) = listbox.row_at_index(0) {
-        listbox.select_row(Some(&first));
-    }
-    count
+    select_first(listbox);
+    matches
 }
 
-/// Populate listbox with only pinned entries (for Pinned tab)
+/// Pinned tab, with drag-and-drop reordering.
 pub fn populate_pinned_list(
     listbox: &ListBox,
     pinned: &[PinnedClipEntry],
     query: &str,
-    cfg: &Config,
-    enable_drag: bool,
+    on_move: MoveFn,
 ) -> usize {
-    while let Some(row) = listbox.row_at_index(0) {
-        listbox.remove(&row);
-    }
-
+    clear(listbox);
     let q = query.to_lowercase();
     let mut count = 0;
-
     for p in pinned {
         if q.is_empty() || p.meta.preview.to_lowercase().contains(&q) {
-            let row = build_pinned_row(p, cfg);
-            if enable_drag {
-                setup_row_drag(&row, p.meta.hash.clone());
+            let row = build_pinned_row(p);
+            if q.is_empty() {
+                // reordering a filtered list would be confusing
+                setup_row_drag(&row, p.meta.hash.clone(), on_move);
             }
             listbox.append(&row);
             count += 1;
         }
     }
-
-    if let Some(first) = listbox.row_at_index(0) {
-        listbox.select_row(Some(&first));
-    }
+    select_first(listbox);
     count
 }
 
-/// Create tab header bar
-pub fn create_tab_bar(pinned_count: usize) -> GtkBox {
+/// Swap generated thumbnails into placeholder rows without rebuilding the
+/// list (keeps selection and scroll position).
+pub fn refresh_thumbnails(listbox: &ListBox) {
+    let mut i = 0;
+    while let Some(row) = listbox.row_at_index(i) {
+        i += 1;
+        let Some(hbox) = row.child() else { continue };
+        let Some(overlay) = hbox.first_child().and_downcast::<Overlay>() else { continue };
+        let name = overlay.widget_name();
+        if name.is_empty() {
+            continue;
+        }
+        let path = Path::new(name.as_str());
+        let pending = overlay.child().is_some_and(|c| c.has_css_class("clip-thumb-pending"));
+        if pending && path.exists() {
+            overlay.set_child(Some(&thumb_frame(path)));
+        }
+    }
+}
+
+/// Tab bar: "Clipboard" | "Pinned (n)". Each tab is clickable.
+pub fn create_tab_bar(on_click: fn(Tab)) -> GtkBox {
     let tab_bar = GtkBox::new(Orientation::Horizontal, 0);
     tab_bar.add_css_class("clip-tab-bar");
 
-    let recent_tab = Label::new(Some("Clipboard"));
-    recent_tab.add_css_class("clip-tab");
-    recent_tab.add_css_class("clip-tab-active");
-    recent_tab.set_widget_name("tab-recent");
-    tab_bar.append(&recent_tab);
-
-    let pinned_tab = Label::new(Some(&format!("Pinned ({})", pinned_count)));
-    pinned_tab.add_css_class("clip-tab");
-    pinned_tab.set_widget_name("tab-pinned");
-    tab_bar.append(&pinned_tab);
-
+    for (text, name, tab) in [
+        ("Clipboard", "tab-recent", Tab::Recent),
+        ("Pinned", "tab-pinned", Tab::Pinned),
+    ] {
+        let label = Label::new(Some(text));
+        label.add_css_class("clip-tab");
+        label.set_widget_name(name);
+        let click = GestureClick::new();
+        click.connect_released(move |_, _, _, _| on_click(tab));
+        label.add_controller(click);
+        tab_bar.append(&label);
+    }
+    update_tab_active(&tab_bar, Tab::Recent);
     tab_bar
 }
 
-/// Update tab active state
 pub fn update_tab_active(tab_bar: &GtkBox, active_tab: Tab) {
     let mut child = tab_bar.first_child();
     while let Some(widget) = child {
-        if let Some(label) = widget.downcast_ref::<Label>() {
-            let name = label.widget_name();
-            label.remove_css_class("clip-tab-active");
-            match active_tab {
-                Tab::Recent if name == "tab-recent" => {
-                    label.add_css_class("clip-tab-active");
-                }
-                Tab::Pinned if name == "tab-pinned" => {
-                    label.add_css_class("clip-tab-active");
-                }
-                _ => {}
-            }
+        let active = matches!(
+            (active_tab, widget.widget_name().as_str()),
+            (Tab::Recent, "tab-recent") | (Tab::Pinned, "tab-pinned")
+        );
+        if active {
+            widget.add_css_class("clip-tab-active");
+        } else {
+            widget.remove_css_class("clip-tab-active");
         }
         child = widget.next_sibling();
     }
 }
 
-/// Update pinned count in tab bar
 pub fn update_pinned_count(tab_bar: &GtkBox, count: usize) {
     let mut child = tab_bar.first_child();
     while let Some(widget) = child {
-        if let Some(label) = widget.downcast_ref::<Label>() {
-            if label.widget_name() == "tab-pinned" {
-                label.set_text(&format!("Pinned ({})", count));
-                break;
+        if widget.widget_name() == "tab-pinned" {
+            if let Some(label) = widget.downcast_ref::<Label>() {
+                label.set_text(&format!("Pinned ({count})"));
             }
+            break;
         }
         child = widget.next_sibling();
     }

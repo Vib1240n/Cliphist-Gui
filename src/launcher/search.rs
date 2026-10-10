@@ -57,8 +57,8 @@ pub fn filter_entries(entries: &[DesktopEntry], query: &str) -> Vec<DesktopEntry
     FREQUENCY.with(|f| {
         let freq = f.borrow();
         for (entry, score) in &mut matched {
-            if let Some(&count) = freq.get(&entry.name) {
-                *score += (count * 50) as i32;
+            if let Some(&count) = freq.get(&entry.id) {
+                *score += (count.min(40) * 50) as i32;
             }
         }
     });
@@ -67,11 +67,3 @@ pub fn filter_entries(entries: &[DesktopEntry], query: &str) -> Vec<DesktopEntry
     matched.into_iter().map(|(e, _)| e).collect()
 }
 
-pub fn get_filtered_entry(
-    entries: &[DesktopEntry],
-    query: &str,
-    idx: usize,
-) -> Option<DesktopEntry> {
-    let filtered = filter_entries(entries, query);
-    filtered.get(idx).cloned()
-}

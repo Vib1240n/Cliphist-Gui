@@ -9,9 +9,12 @@ path = "main.rs"
 
 [dependencies]
 common = { path = "../common" }
-gtk4 = "0.9"
+snippets = { path = "../snippets" }
+gtk4 = { version = "0.9", features = ["v4_12"] }
 gtk4-layer-shell = "0.4"
 gdk4 = "0.9"
 glib = "0.20"
 gio = "0.20"
 libc = "0.2"
+ignore = "0.4"
+nucleo-matcher = "0.3"

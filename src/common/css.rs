@@ -1,5 +1,31 @@
 use crate::logging::log;
+use std::cell::RefCell;
 use std::path::PathBuf;
+
+thread_local! {
+    static APP_PROVIDER: RefCell<Option<gtk4::CssProvider>> = const { RefCell::new(None) };
+}
+
+/// Install (or replace) the app's stylesheet. Reloads swap the provider instead
+/// of stacking a new one on top each time.
+pub fn apply_css(css: &str) {
+    let Some(display) = gtk4::gdk::Display::default() else {
+        return;
+    };
+    let provider = gtk4::CssProvider::new();
+    provider.load_from_string(css);
+    APP_PROVIDER.with(|p| {
+        if let Some(old) = p.borrow_mut().take() {
+            gtk4::style_context_remove_provider_for_display(&display, &old);
+        }
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        *p.borrow_mut() = Some(provider);
+    });
+}
 
 pub fn load_css(app_name: &str, theme_path: &str, default_css: &str) -> String {
     let p = PathBuf::from(theme_path);

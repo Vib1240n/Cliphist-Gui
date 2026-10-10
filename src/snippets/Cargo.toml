@@ -1,0 +1,13 @@
+[package]
+name = "snippets"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+chacha20poly1305 = "0.10"
+blake3 = "1"
+base64 = "0.22"
+libc = "0.2"

@@ -1,5 +1,5 @@
 [workspace]
-members = ["src/common", "src/cliphist", "src/launcher"]
+members = ["src/common", "src/cliphist", "src/launcher", "src/snippets", "src/snippetd"]
 resolver = "2"
 
 [profile.release]

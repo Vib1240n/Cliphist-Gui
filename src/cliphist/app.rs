@@ -1,15 +1,15 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use gdk4::prelude::*;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Application, ApplicationWindow, Box as GtkBox, CssProvider, Entry, EventControllerKey,
-    GestureClick, Label, ListBox, Orientation, ScrolledWindow,
+    Align, Application, ApplicationWindow, Box as GtkBox, Entry, EventControllerKey, Label,
+    ListBox, ListBoxRow, Orientation, ScrolledWindow,
 };
 
 use common::{
-    css::load_css,
+    css::{apply_css, load_css, scroll_to_selected},
     keys::match_action,
     layer::{apply_layer_shell, update_cursor_position},
     logging::log,
@@ -22,17 +22,23 @@ use common::{
 
 use crate::config::{default_css, Config, APP_NAME};
 use crate::entries::{
-    delete_entry, fetch_entries, get_filtered_entry, get_pinned_hash, load_pinned, pin_entry,
+    self, delete_entry, fetch_entries, get_pinned_hash, load_pinned, move_pinned, pin_entry,
     select_entry, select_pinned, unpin_entry, ClipEntry, PinnedClipEntry,
 };
 use crate::ui::{
-    create_tab_bar, populate_list, populate_pinned_list, update_pinned_count, update_tab_active,
-    Tab,
+    create_tab_bar, populate_list, populate_pinned_list, refresh_thumbnails,
+    update_pinned_count, update_tab_active, Tab, PINNED_PREFIX,
 };
 
+/// More pins than this and they move from the top of Recent to their own tab.
+const INLINE_PIN_LIMIT: usize = 5;
+const PAGE: i32 = 10;
+
 pub struct AppWidgets {
+    pub window: ApplicationWindow,
     pub search: Entry,
     pub listbox: ListBox,
+    pub scroll: ScrolledWindow,
     pub status: Label,
     pub mode_label: Label,
     pub tab_bar: GtkBox,
@@ -42,12 +48,23 @@ pub struct AppWidgets {
 }
 
 thread_local! {
-    pub static WIDGETS: RefCell<Option<AppWidgets>> = const { RefCell::new(None) };
-    pub static CONFIG: RefCell<Config> = RefCell::new(Config::default());
-    pub static CURRENT_TAB: RefCell<Tab> = const { RefCell::new(Tab::Recent) };
+    static WIDGETS: RefCell<Option<AppWidgets>> = const { RefCell::new(None) };
+    static CONFIG: RefCell<Config> = RefCell::new(Config::default());
+    static CURRENT_TAB: RefCell<Tab> = const { RefCell::new(Tab::Recent) };
 }
 
-fn get_current_tab() -> Tab {
+/// One thumbnail worker at a time
+static THUMB_WORKER: AtomicBool = AtomicBool::new(false);
+
+fn with_wg<R>(f: impl FnOnce(&AppWidgets) -> R) -> Option<R> {
+    WIDGETS.with(|w| w.borrow().as_ref().map(f))
+}
+
+fn cfg() -> Config {
+    CONFIG.with(|c| c.borrow().clone())
+}
+
+fn current_tab() -> Tab {
     CURRENT_TAB.with(|t| *t.borrow())
 }
 
@@ -55,281 +72,363 @@ fn set_current_tab(tab: Tab) {
     CURRENT_TAB.with(|t| *t.borrow_mut() = tab);
 }
 
-fn refresh_list(cfg: &Config) {
-    WIDGETS.with(|w| {
-        if let Some(ref wg) = *w.borrow() {
-            let query = wg.search.text().to_string();
-            let pinned = wg.pinned.borrow();
-            let pinned_count = pinned.len();
+// ---------------------------------------------------------------------------
+// What the selected row refers to
+// ---------------------------------------------------------------------------
 
-            // Update tab bar visibility and count
-            if pinned_count > 5 {
-                wg.tab_bar.set_visible(true);
-                wg.section_label.set_visible(false);
-                update_pinned_count(&wg.tab_bar, pinned_count);
-            } else {
-                wg.tab_bar.set_visible(false);
-                wg.section_label.set_visible(true);
+enum Target {
+    Pinned(String),
+    Entry(ClipEntry),
+}
+
+/// Resolve a row by its name (cliphist id or "pinned:<hash>"), never by its
+/// position: pinned rows shown above the history used to shift every index.
+fn target_for_row(wg: &AppWidgets, row: &ListBoxRow) -> Option<Target> {
+    let name = row.widget_name();
+    if let Some(hash) = name.strip_prefix(PINNED_PREFIX) {
+        return Some(Target::Pinned(hash.to_string()));
+    }
+    wg.entries
+        .borrow()
+        .iter()
+        .find(|e| e.id == name.as_str())
+        .cloned()
+        .map(Target::Entry)
+}
+
+fn selected_target(wg: &AppWidgets) -> Option<Target> {
+    target_for_row(wg, &wg.listbox.selected_row()?)
+}
+
+// ---------------------------------------------------------------------------
+// List
+// ---------------------------------------------------------------------------
+
+/// Rebuild the list. `keep`: row index to reselect (clamped), e.g. after delete.
+fn refresh_list(keep: Option<i32>) {
+    with_wg(|wg| {
+        let query = wg.search.text().to_string();
+        let pinned = wg.pinned.borrow();
+        let pinned_count = pinned.len();
+        let tabs = pinned_count > INLINE_PIN_LIMIT;
+
+        wg.tab_bar.set_visible(tabs);
+        wg.section_label.set_visible(!tabs);
+        if tabs {
+            update_pinned_count(&wg.tab_bar, pinned_count);
+        } else if current_tab() == Tab::Pinned {
+            set_current_tab(Tab::Recent);
+            update_tab_active(&wg.tab_bar, Tab::Recent);
+        }
+
+        let n = match current_tab() {
+            Tab::Recent => {
+                populate_list(&wg.listbox, &wg.entries.borrow(), &pinned, &query, !tabs)
             }
+            Tab::Pinned => populate_pinned_list(&wg.listbox, &pinned, &query, on_pinned_moved),
+        };
 
-            let current_tab = get_current_tab();
+        let status = match current_tab() {
+            Tab::Recent if tabs => format!("{n} items · {pinned_count} pinned (Ctrl+Tab)"),
+            Tab::Recent if pinned_count > 0 => format!("{n} items ({pinned_count} pinned)"),
+            Tab::Recent => format!("{n} items"),
+            Tab::Pinned => format!("{n} pinned · drag to reorder"),
+        };
+        wg.status.set_text(&status);
 
-            // If on pinned tab but pinned count dropped to <= 5, switch to recent
-            if current_tab == Tab::Pinned && pinned_count <= 5 {
-                set_current_tab(Tab::Recent);
-            }
-
-            let n = match get_current_tab() {
-                Tab::Recent => {
-                    let entries = wg.entries.borrow();
-                    populate_list(&wg.listbox, &entries, &pinned, &query, cfg)
-                }
-                Tab::Pinned => populate_pinned_list(&wg.listbox, &pinned, &query, cfg, true),
-            };
-
-            let status_text = match get_current_tab() {
-                Tab::Recent => {
-                    if pinned_count > 0 && pinned_count <= 5 {
-                        format!("{} items ({} pinned)", n, pinned_count)
-                    } else {
-                        format!("{} items", n)
-                    }
-                }
-                Tab::Pinned => format!("{} pinned", n),
-            };
-            wg.status.set_text(&status_text);
+        if let Some(i) = keep {
+            select_index(wg, i);
         }
     });
 }
 
-fn switch_tab(tab: Tab, cfg: &Config) {
+fn reload_pinned() {
+    with_wg(|wg| *wg.pinned.borrow_mut() = load_pinned());
+}
+
+fn on_pinned_moved(source: String, target: String) {
+    move_pinned(&source, &target);
+    reload_pinned();
+    refresh_list(None);
+}
+
+fn switch_tab(tab: Tab) {
     set_current_tab(tab);
-    WIDGETS.with(|w| {
-        if let Some(ref wg) = *w.borrow() {
-            update_tab_active(&wg.tab_bar, tab);
-        }
-    });
-    refresh_list(cfg);
+    with_wg(|wg| update_tab_active(&wg.tab_bar, tab));
+    refresh_list(None);
 }
 
-fn toggle_tab(cfg: &Config) {
-    let current = get_current_tab();
-    let pinned_count = WIDGETS.with(|w| {
-        w.borrow()
-            .as_ref()
-            .map(|wg| wg.pinned.borrow().len())
-            .unwrap_or(0)
-    });
-
-    // Only toggle if we have > 5 pinned (tabs visible)
-    if pinned_count > 5 {
-        let new_tab = match current {
+fn toggle_tab() {
+    let tabs_visible = with_wg(|wg| wg.pinned.borrow().len() > INLINE_PIN_LIMIT).unwrap_or(false);
+    if tabs_visible {
+        switch_tab(match current_tab() {
             Tab::Recent => Tab::Pinned,
             Tab::Pinned => Tab::Recent,
-        };
-        switch_tab(new_tab, cfg);
+        });
     }
 }
 
-fn handle_pin(cfg: &Config) {
-    WIDGETS.with(|w| {
-        if let Some(ref wg) = *w.borrow() {
-            let current_tab = get_current_tab();
+// ---------------------------------------------------------------------------
+// Navigation
+// ---------------------------------------------------------------------------
 
-            if current_tab == Tab::Pinned {
-                // Can't pin from pinned tab (already pinned)
-                return;
-            }
-
-            if let Some(row) = wg.listbox.selected_row() {
-                let query = wg.search.text().to_string();
-                let entries = wg.entries.borrow();
-
-                if let Some(entry) = get_filtered_entry(&entries, &query, row.index() as usize) {
-                    match pin_entry(&entry, cfg.max_pinned) {
-                        Ok(()) => {
-                            log(APP_NAME, &format!("pinned entry: {}", entry.id));
-                            // Reload pinned
-                            drop(entries);
-                            let mut pinned = wg.pinned.borrow_mut();
-                            *pinned = load_pinned();
-                        }
-                        Err(e) => {
-                            log(APP_NAME, &format!("pin failed: {}", e));
-                        }
-                    }
-                }
-            }
-        }
-    });
-    refresh_list(cfg);
+#[derive(Clone, Copy)]
+enum Nav {
+    By(i32),
+    First,
+    Last,
 }
 
-fn handle_unpin(cfg: &Config) {
-    WIDGETS.with(|w| {
-        if let Some(ref wg) = *w.borrow() {
-            if let Some(row) = wg.listbox.selected_row() {
-                let widget_name = row.widget_name().to_string();
-
-                let hash = if widget_name.starts_with("pinned:") {
-                    // Direct pinned row
-                    widget_name.strip_prefix("pinned:").map(|s| s.to_string())
-                } else {
-                    // Regular entry - check if pinned
-                    let query = wg.search.text().to_string();
-                    let entries = wg.entries.borrow();
-                    get_filtered_entry(&entries, &query, row.index() as usize)
-                        .and_then(|e| get_pinned_hash(&e))
-                };
-
-                if let Some(hash) = hash {
-                    unpin_entry(&hash);
-                    log(APP_NAME, &format!("unpinned: {}", hash));
-                    // Reload pinned
-                    let mut pinned = wg.pinned.borrow_mut();
-                    *pinned = load_pinned();
-                }
-            }
-        }
-    });
-    refresh_list(cfg);
+fn row_count(wg: &AppWidgets) -> i32 {
+    wg.listbox.observe_children().n_items() as i32
 }
 
-fn handle_select(cfg: &Config) -> bool {
-    let mut selected = false;
-    WIDGETS.with(|w| {
-        if let Some(ref wg) = *w.borrow() {
-            if let Some(row) = wg.listbox.selected_row() {
-                let widget_name = row.widget_name().to_string();
-
-                if widget_name.starts_with("pinned:") {
-                    // Pinned entry
-                    let hash = widget_name.strip_prefix("pinned:").unwrap();
-                    let pinned = wg.pinned.borrow();
-                    if let Some(entry) = pinned.iter().find(|p| p.meta.hash == hash) {
-                        select_pinned(entry, cfg.notify_on_copy);
-                        selected = true;
-                    }
-                } else {
-                    // Regular entry
-                    let query = wg.search.text().to_string();
-                    let entries = wg.entries.borrow();
-                    if let Some(entry) = get_filtered_entry(&entries, &query, row.index() as usize)
-                    {
-                        select_entry(&entry, cfg.notify_on_copy);
-                        selected = true;
-                    }
-                }
-            }
-        }
-    });
-    selected
+fn select_index(wg: &AppWidgets, idx: i32) {
+    let n = row_count(wg);
+    if n == 0 {
+        return;
+    }
+    if let Some(r) = wg.listbox.row_at_index(idx.clamp(0, n - 1)) {
+        wg.listbox.select_row(Some(&r));
+        scroll_to_selected(&wg.listbox, &wg.scroll);
+    }
 }
 
-fn handle_delete(cfg: &Config) {
-    WIDGETS.with(|w| {
-        if let Some(ref wg) = *w.borrow() {
-            let current_tab = get_current_tab();
-
-            if let Some(row) = wg.listbox.selected_row() {
-                let widget_name = row.widget_name().to_string();
-
-                if widget_name.starts_with("pinned:") {
-                    // Deleting a pinned entry = unpin it
-                    let hash = widget_name.strip_prefix("pinned:").unwrap();
-                    unpin_entry(hash);
-                    log(APP_NAME, &format!("deleted (unpinned): {}", hash));
-                    let mut pinned = wg.pinned.borrow_mut();
-                    *pinned = load_pinned();
-                } else if current_tab == Tab::Recent {
-                    // Regular delete from cliphist
-                    let query = wg.search.text().to_string();
-                    let entries = wg.entries.borrow();
-                    if let Some(entry) = get_filtered_entry(&entries, &query, row.index() as usize)
-                    {
-                        delete_entry(&entry);
-                        drop(entries);
-                        let mut entries = wg.entries.borrow_mut();
-                        *entries = fetch_entries(cfg.max_items);
-                    }
-                }
-            }
-        }
+fn navigate(nav: Nav) {
+    with_wg(|wg| {
+        let cur = wg.listbox.selected_row().map_or(0, |r| r.index());
+        let target = match nav {
+            Nav::By(d) => cur + d,
+            Nav::First => 0,
+            Nav::Last => row_count(wg) - 1,
+        };
+        select_index(wg, target);
     });
-    refresh_list(cfg);
 }
 
-pub fn activate(app: &Application) {
+// ---------------------------------------------------------------------------
+// Actions
+// ---------------------------------------------------------------------------
+
+fn copy_target(target: &Target, notify: bool) -> bool {
+    match target {
+        Target::Pinned(hash) => with_wg(|wg| {
+            wg.pinned
+                .borrow()
+                .iter()
+                .find(|p| &p.meta.hash == hash)
+                .is_some_and(|p| select_pinned(p, notify))
+        })
+        .unwrap_or(false),
+        Target::Entry(e) => select_entry(e, notify),
+    }
+}
+
+fn hide() {
+    with_wg(|wg| wg.window.set_visible(false));
+}
+
+fn handle_select() {
+    let cfg = cfg();
+    let copied = with_wg(selected_target)
+        .flatten()
+        .is_some_and(|t| copy_target(&t, cfg.notify_on_copy));
+    if copied && cfg.close_on_select {
+        hide();
+    }
+}
+
+fn handle_row_activated(row: &ListBoxRow) {
+    let cfg = cfg();
+    let copied = with_wg(|wg| target_for_row(wg, row))
+        .flatten()
+        .is_some_and(|t| copy_target(&t, cfg.notify_on_copy));
+    if copied && cfg.close_on_select {
+        hide();
+    }
+}
+
+fn selected_index() -> Option<i32> {
+    with_wg(|wg| wg.listbox.selected_row().map(|r| r.index())).flatten()
+}
+
+/// Show a message in the status bar until the next refresh
+fn flash_status(msg: &str) {
+    with_wg(|wg| wg.status.set_text(msg));
+}
+
+fn handle_pin() {
+    if current_tab() == Tab::Pinned {
+        return; // already pinned
+    }
+    let Some(Target::Entry(entry)) = with_wg(selected_target).flatten() else {
+        return;
+    };
+    let keep = selected_index();
+    match pin_entry(&entry, cfg().max_pinned) {
+        Ok(()) => {
+            log(APP_NAME, &format!("pinned entry {}", entry.id));
+            reload_pinned();
+            refresh_list(keep);
+        }
+        Err(e) => {
+            log(APP_NAME, &format!("pin failed: {e}"));
+            flash_status(&e);
+        }
+    }
+}
+
+fn handle_unpin() {
+    let hash = match with_wg(selected_target).flatten() {
+        Some(Target::Pinned(h)) => Some(h),
+        Some(Target::Entry(e)) => get_pinned_hash(&e),
+        None => None,
+    };
+    let Some(hash) = hash else {
+        flash_status("Not pinned");
+        return;
+    };
+    let keep = selected_index();
+    unpin_entry(&hash);
+    log(APP_NAME, &format!("unpinned {hash}"));
+    reload_pinned();
+    refresh_list(keep);
+}
+
+fn handle_delete() {
+    let keep = selected_index();
+    match with_wg(selected_target).flatten() {
+        // deleting a pin = unpinning it
+        Some(Target::Pinned(hash)) => {
+            unpin_entry(&hash);
+            reload_pinned();
+        }
+        Some(Target::Entry(e)) => {
+            delete_entry(&e);
+            with_wg(|wg| wg.entries.borrow_mut().retain(|x| x.id != e.id));
+        }
+        None => return,
+    }
+    refresh_list(keep);
+}
+
+fn clear_search() {
+    with_wg(|wg| wg.search.set_text(""));
+}
+
+// ---------------------------------------------------------------------------
+// Thumbnails
+// ---------------------------------------------------------------------------
+
+/// Generate missing thumbnails (and prune stale ones) off the UI thread, then
+/// swap them into the visible rows.
+fn start_thumbnail_worker() {
+    let Some((jobs, keep)) = with_wg(|wg| {
+        let entries = wg.entries.borrow();
+        let pinned = wg.pinned.borrow();
+        (
+            entries::thumb_jobs(&entries, &pinned),
+            entries::thumb_keep_set(&entries, &pinned),
+        )
+    }) else {
+        return;
+    };
+    if THUMB_WORKER.swap(true, Ordering::SeqCst) {
+        return; // one is already running; the next open picks up the rest
+    }
+    std::thread::spawn(move || {
+        let made = entries::generate_thumbs(&jobs);
+        entries::prune_thumb_cache(&keep);
+        THUMB_WORKER.store(false, Ordering::SeqCst);
+        if made > 0 {
+            glib::MainContext::default().invoke(|| {
+                with_wg(|wg| refresh_thumbnails(&wg.listbox));
+            });
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Window
+// ---------------------------------------------------------------------------
+
+fn css_for(cfg: &Config) -> String {
+    if let Ok(theme) = std::env::var("GUI_THEME_OVERRIDE") {
+        if let Some(css) = common::paths::get_theme_css(&theme) {
+            return css;
+        }
+    }
+    if !cfg.base.theme.contains('/') && !cfg.base.theme.ends_with(".css") {
+        return common::paths::get_theme_css(&cfg.base.theme)
+            .unwrap_or_else(|| default_css().to_string());
+    }
+    load_css(APP_NAME, &cfg.base.theme, default_css())
+}
+
+/// Show if hidden, hide if shown. Shared by first activation and SIGUSR1.
+fn toggle_window() {
+    let Some(visible) = with_wg(|wg| wg.window.is_visible()) else {
+        return;
+    };
+    if visible {
+        hide();
+    } else {
+        show_window();
+    }
+}
+
+fn show_window() {
     let cfg = Config::load();
     CONFIG.with(|c| *c.borrow_mut() = cfg.clone());
-
     if cfg.vim_mode {
         set_vim_mode(VimMode::Normal);
     }
-
     set_current_tab(Tab::Recent);
 
-    if let Some(win) = app.active_window() {
-        if win.is_visible() {
-            win.set_visible(false);
-        } else {
-            if cfg.base.anchor == Anchor::Cursor {
-                update_cursor_position(&win);
-            }
-
-            if cfg.vim_mode {
-                set_vim_mode(VimMode::Normal);
-            }
-
-            set_current_tab(Tab::Recent);
-
-            WIDGETS.with(|w| {
-                if let Some(ref wg) = *w.borrow() {
-                    let mut entries = wg.entries.borrow_mut();
-                    *entries = fetch_entries(cfg.max_items);
-                    drop(entries);
-
-                    let mut pinned = wg.pinned.borrow_mut();
-                    *pinned = load_pinned();
-                    drop(pinned);
-
-                    wg.search.set_text("");
-
-                    if cfg.vim_mode {
-                        update_mode_display(&wg.mode_label, VimMode::Normal);
-                        wg.listbox.grab_focus();
-                    } else {
-                        wg.search.grab_focus();
-                    }
-                }
-            });
-
-            refresh_list(&cfg);
-            win.set_visible(true);
-            win.present();
+    with_wg(|wg| {
+        if cfg.base.anchor == Anchor::Cursor {
+            update_cursor_position(wg.window.upcast_ref());
         }
-        return;
-    }
+        *wg.entries.borrow_mut() = fetch_entries(cfg.max_items);
+        *wg.pinned.borrow_mut() = load_pinned();
+        update_tab_active(&wg.tab_bar, Tab::Recent);
+        wg.search.set_text("");
+    });
 
-    let css_content = if let Ok(theme) = std::env::var("GUI_THEME_OVERRIDE") {
-        common::paths::get_theme_css(&theme)
-            .unwrap_or_else(|| load_css(APP_NAME, &cfg.base.theme, default_css()))
-    } else if !cfg.base.theme.contains('/') && !cfg.base.theme.ends_with(".css") {
-        common::paths::get_theme_css(&cfg.base.theme).unwrap_or_else(|| default_css().to_string())
-    } else {
-        load_css(APP_NAME, &cfg.base.theme, default_css())
-    };
+    refresh_list(None);
 
-    let provider = CssProvider::new();
-    provider.load_from_data(&css_content);
-    gtk4::style_context_add_provider_for_display(
-        &gdk4::Display::default().expect("no display"),
-        &provider,
-        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
+    with_wg(|wg| {
+        if cfg.vim_mode {
+            update_mode_display(&wg.mode_label, VimMode::Normal);
+            wg.mode_label.set_visible(true);
+        } else {
+            wg.mode_label.set_visible(false);
+        }
+        wg.window.set_visible(true);
+        wg.window.present();
+        if cfg.vim_mode {
+            wg.listbox.grab_focus();
+        } else {
+            wg.search.grab_focus();
+        }
+    });
 
-    let entries: Rc<RefCell<Vec<ClipEntry>>> = Rc::new(RefCell::new(Vec::new()));
-    let pinned: Rc<RefCell<Vec<PinnedClipEntry>>> = Rc::new(RefCell::new(Vec::new()));
+    start_thumbnail_worker();
+}
+
+fn hint(k: &str, h: &str) -> GtkBox {
+    let b = GtkBox::new(Orientation::Horizontal, 0);
+    let kl = Label::new(Some(k));
+    kl.add_css_class("clip-status-key");
+    b.append(&kl);
+    let hl = Label::new(Some(h));
+    hl.add_css_class("clip-status-hint");
+    b.append(&hl);
+    b
+}
+
+fn build_window(app: &Application, cfg: &Config) {
+    apply_css(&css_for(cfg));
 
     let window = ApplicationWindow::builder()
         .application(app)
@@ -337,7 +436,6 @@ pub fn activate(app: &Application) {
         .default_height(cfg.base.height)
         .resizable(false)
         .build();
-
     apply_layer_shell(&window, &cfg.base, APP_NAME);
     window.set_default_size(cfg.base.width, cfg.base.height);
 
@@ -368,44 +466,16 @@ pub fn activate(app: &Application) {
     search_row.append(&hint_box);
     header.append(&search_row);
 
-    // Tab bar (hidden initially, shown when > 5 pinned)
-    let tab_bar = create_tab_bar(0);
+    // Tab bar (only when there are more than INLINE_PIN_LIMIT pins)
+    let tab_bar = create_tab_bar(switch_tab);
     tab_bar.set_visible(false);
     header.append(&tab_bar);
 
-    // Section label (shown when <= 5 pinned)
     let section_label = Label::new(Some("Recent"));
     section_label.set_xalign(0.0);
     section_label.add_css_class("clip-section-label");
     header.append(&section_label);
-
     container.append(&header);
-
-    // Tab click handlers
-    let cfg_tab = cfg.clone();
-    let tab_bar_click = tab_bar.clone();
-    let click_ctrl = GestureClick::new();
-    click_ctrl.connect_released(move |_, _, x, _| {
-        let mut child = tab_bar_click.first_child();
-        let mut offset = 0.0;
-        while let Some(widget) = child {
-            let width = widget.width() as f64;
-            if x >= offset && x < offset + width {
-                if let Some(label) = widget.downcast_ref::<Label>() {
-                    let name = label.widget_name();
-                    if name == "tab-recent" {
-                        switch_tab(Tab::Recent, &cfg_tab);
-                    } else if name == "tab-pinned" {
-                        switch_tab(Tab::Pinned, &cfg_tab);
-                    }
-                }
-                break;
-            }
-            offset += width;
-            child = widget.next_sibling();
-        }
-    });
-    tab_bar.add_controller(click_ctrl);
 
     // List
     let scroll = ScrolledWindow::new();
@@ -417,7 +487,6 @@ pub fn activate(app: &Application) {
     listbox.set_selection_mode(gtk4::SelectionMode::Single);
     scroll.set_child(Some(&listbox));
     container.append(&scroll);
-    let scroll_k = scroll.clone();
 
     // Status bar
     let status_bar = GtkBox::new(Orientation::Horizontal, 0);
@@ -426,12 +495,7 @@ pub fn activate(app: &Application) {
     let mode_label = Label::new(Some(""));
     mode_label.add_css_class("vim-mode-indicator");
     mode_label.set_halign(Align::Start);
-    if cfg.vim_mode {
-        update_mode_display(&mode_label, VimMode::Normal);
-        mode_label.set_visible(true);
-    } else {
-        mode_label.set_visible(false);
-    }
+    mode_label.set_visible(false);
     status_bar.append(&mode_label);
 
     let status = Label::new(Some("0 items"));
@@ -442,327 +506,149 @@ pub fn activate(app: &Application) {
 
     let hints = GtkBox::new(Orientation::Horizontal, 12);
     hints.set_halign(Align::End);
-
-    if cfg.vim_mode {
-        for (k, h) in [
-            ("i", "insert"),
-            ("j/k", "nav"),
-            ("p", "pin"),
-            ("u", "unpin"),
-            ("dd", "delete"),
-        ] {
-            let b = GtkBox::new(Orientation::Horizontal, 0);
-            let kl = Label::new(Some(k));
-            kl.add_css_class("clip-status-key");
-            b.append(&kl);
-            let hl = Label::new(Some(h));
-            hl.add_css_class("clip-status-hint");
-            b.append(&hl);
-            hints.append(&b);
-        }
+    let hint_list: &[(&str, &str)] = if cfg.vim_mode {
+        &[("i", "insert"), ("p", "pin"), ("u", "unpin"), ("dd", "delete")]
     } else {
-        for (k, h) in [("Enter", "select"), ("Ctrl+p", "pin"), ("Del", "delete")] {
-            let b = GtkBox::new(Orientation::Horizontal, 0);
-            let kl = Label::new(Some(k));
-            kl.add_css_class("clip-status-key");
-            b.append(&kl);
-            let hl = Label::new(Some(h));
-            hl.add_css_class("clip-status-hint");
-            b.append(&hl);
-            hints.append(&b);
-        }
+        &[("Enter", "select"), ("Ctrl+p", "pin")]
+    };
+    for (k, h) in hint_list {
+        hints.append(&hint(k, h));
     }
     status_bar.append(&hints);
     container.append(&status_bar);
     window.set_child(Some(&container));
 
-    // Search handler
-    let cfg_search = cfg.clone();
-    search.connect_changed(move |_| {
-        refresh_list(&cfg_search);
-    });
+    search.connect_changed(|_| refresh_list(None));
+    listbox.connect_row_activated(|_, row| handle_row_activated(row));
 
-    // Key controller
     let key_ctrl = EventControllerKey::new();
     key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
-    let wk = window.clone();
-    let sk = search.clone();
-    let lk = listbox.clone();
-    let mode_k = mode_label.clone();
-
-    key_ctrl.connect_key_pressed(move |_, key, _, mods| {
-        let cfg = CONFIG.with(|c| c.borrow().clone());
-        let vim_enabled = cfg.vim_mode;
-
-        // Check for tab_switch keybind (handled via Action system below)
-        // Alt+Tab default for switching tabs
-        if key == gdk4::Key::Tab && mods.contains(gdk4::ModifierType::ALT_MASK) {
-            toggle_tab(&cfg);
-            return glib::Propagation::Stop;
-        }
-
-        if vim_enabled {
-            let current_mode = get_vim_mode();
-
-            match current_mode {
-                VimMode::Normal => {
-                    // allow_delete = true, allow_pin = true for cliphist
-                    if let Some(action) = handle_vim_normal_key(key, mods, true, true) {
-                        match action {
-                            VimAction::Close => {
-                                wk.set_visible(false);
-                            }
-                            VimAction::Select => {
-                                if handle_select(&cfg) && cfg.close_on_select {
-                                    wk.set_visible(false);
-                                }
-                            }
-                            VimAction::Delete => {
-                                handle_delete(&cfg);
-                            }
-                            VimAction::Pin => {
-                                handle_pin(&cfg);
-                            }
-                            VimAction::Unpin => {
-                                handle_unpin(&cfg);
-                            }
-                            VimAction::TabSwitch => {
-                                toggle_tab(&cfg);
-                            }
-                            VimAction::EnterInsert => {
-                                set_vim_mode(VimMode::Insert);
-                                update_mode_display(&mode_k, VimMode::Insert);
-                                sk.grab_focus();
-                            }
-                            VimAction::Down => {
-                                if let Some(r) = lk.selected_row() {
-                                    if let Some(n) = lk.row_at_index(r.index() + 1) {
-                                        lk.select_row(Some(&n));
-                                        common::css::scroll_to_selected(&lk, &scroll_k);
-                                    }
-                                }
-                            }
-                            VimAction::Up => {
-                                if let Some(r) = lk.selected_row() {
-                                    if r.index() > 0 {
-                                        if let Some(p) = lk.row_at_index(r.index() - 1) {
-                                            lk.select_row(Some(&p));
-                                            common::css::scroll_to_selected(&lk, &scroll_k);
-                                        }
-                                    }
-                                }
-                            }
-                            VimAction::Top => {
-                                if let Some(r) = lk.row_at_index(0) {
-                                    lk.select_row(Some(&r));
-                                    common::css::scroll_to_selected(&lk, &scroll_k);
-                                }
-                            }
-                            VimAction::Bottom => {
-                                let n = lk.observe_children().n_items();
-                                if n > 0 {
-                                    if let Some(r) = lk.row_at_index(n as i32 - 1) {
-                                        lk.select_row(Some(&r));
-                                        common::css::scroll_to_selected(&lk, &scroll_k);
-                                    }
-                                }
-                            }
-                            VimAction::HalfPageDown => {
-                                if let Some(r) = lk.selected_row() {
-                                    let t = (r.index() + 10)
-                                        .min(lk.observe_children().n_items() as i32 - 1);
-                                    if let Some(nr) = lk.row_at_index(t) {
-                                        lk.select_row(Some(&nr));
-                                        common::css::scroll_to_selected(&lk, &scroll_k);
-                                    }
-                                }
-                            }
-                            VimAction::HalfPageUp => {
-                                if let Some(r) = lk.selected_row() {
-                                    let t = (r.index() - 10).max(0);
-                                    if let Some(nr) = lk.row_at_index(t) {
-                                        lk.select_row(Some(&nr));
-                                        common::css::scroll_to_selected(&lk, &scroll_k);
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                        return glib::Propagation::Stop;
-                    }
-                    return glib::Propagation::Stop;
-                }
-                VimMode::Insert => {
-                    if let Some(action) = handle_vim_insert_key(key) {
-                        if action == VimAction::ExitInsert {
-                            set_vim_mode(VimMode::Normal);
-                            update_mode_display(&mode_k, VimMode::Normal);
-                            lk.grab_focus();
-                        }
-                    }
-                    if key == gdk4::Key::Return {
-                        if handle_select(&cfg) && cfg.close_on_select {
-                            wk.set_visible(false);
-                        }
-                        return glib::Propagation::Stop;
-                    }
-                    return glib::Propagation::Proceed;
-                }
-            }
-        } else {
-            // Non-vim mode
-            let action = match_action(&cfg.base.keybinds, key, mods);
-
-            if let Some(action) = action {
-                match action {
-                    Action::Close => {
-                        wk.set_visible(false);
-                    }
-                    Action::Select => {
-                        if handle_select(&cfg) && cfg.close_on_select {
-                            wk.set_visible(false);
-                        }
-                    }
-                    Action::Delete => {
-                        handle_delete(&cfg);
-                    }
-                    Action::Pin => {
-                        handle_pin(&cfg);
-                    }
-                    Action::Unpin => {
-                        handle_unpin(&cfg);
-                    }
-                    Action::ClearSearch => {
-                        sk.set_text("");
-                    }
-                    Action::Next => {
-                        if let Some(r) = lk.selected_row() {
-                            if let Some(n) = lk.row_at_index(r.index() + 1) {
-                                lk.select_row(Some(&n));
-                                common::css::scroll_to_selected(&lk, &scroll_k);
-                            }
-                        }
-                    }
-                    Action::Prev => {
-                        if let Some(r) = lk.selected_row() {
-                            if r.index() > 0 {
-                                if let Some(p) = lk.row_at_index(r.index() - 1) {
-                                    lk.select_row(Some(&p));
-                                    common::css::scroll_to_selected(&lk, &scroll_k);
-                                }
-                            }
-                        }
-                    }
-                    Action::PageDown => {
-                        if let Some(r) = lk.selected_row() {
-                            let t =
-                                (r.index() + 10).min(lk.observe_children().n_items() as i32 - 1);
-                            if let Some(nr) = lk.row_at_index(t) {
-                                lk.select_row(Some(&nr));
-                                common::css::scroll_to_selected(&lk, &scroll_k);
-                            }
-                        }
-                    }
-                    Action::PageUp => {
-                        if let Some(r) = lk.selected_row() {
-                            let t = (r.index() - 10).max(0);
-                            if let Some(nr) = lk.row_at_index(t) {
-                                lk.select_row(Some(&nr));
-                                common::css::scroll_to_selected(&lk, &scroll_k);
-                            }
-                        }
-                    }
-                    Action::First => {
-                        if let Some(r) = lk.row_at_index(0) {
-                            lk.select_row(Some(&r));
-                            common::css::scroll_to_selected(&lk, &scroll_k);
-                        }
-                    }
-                    Action::Last => {
-                        let n = lk.observe_children().n_items();
-                        if n > 0 {
-                            if let Some(r) = lk.row_at_index(n as i32 - 1) {
-                                lk.select_row(Some(&r));
-                                common::css::scroll_to_selected(&lk, &scroll_k);
-                            }
-                        }
-                    }
-                    Action::TabSwitch => {
-                        toggle_tab(&cfg);
-                    }
-                }
-                return glib::Propagation::Stop;
-            }
-        }
-        glib::Propagation::Proceed
-    });
+    key_ctrl.connect_key_pressed(|_, key, _, mods| on_key(key, mods));
     window.add_controller(key_ctrl);
-
-    // Click to select
-    let cfg_click = cfg.clone();
-    let wc = window.clone();
-    listbox.connect_row_activated(move |_, row| {
-        let widget_name = row.widget_name().to_string();
-
-        WIDGETS.with(|w| {
-            if let Some(ref wg) = *w.borrow() {
-                if widget_name.starts_with("pinned:") {
-                    let hash = widget_name.strip_prefix("pinned:").unwrap();
-                    let pinned = wg.pinned.borrow();
-                    if let Some(entry) = pinned.iter().find(|p| p.meta.hash == hash) {
-                        select_pinned(entry, cfg_click.notify_on_copy);
-                        if cfg_click.close_on_select {
-                            wc.set_visible(false);
-                        }
-                    }
-                } else {
-                    let query = wg.search.text().to_string();
-                    let entries = wg.entries.borrow();
-                    if let Some(entry) = get_filtered_entry(&entries, &query, row.index() as usize)
-                    {
-                        select_entry(&entry, cfg_click.notify_on_copy);
-                        if cfg_click.close_on_select {
-                            wc.set_visible(false);
-                        }
-                    }
-                }
-            }
-        });
-    });
 
     WIDGETS.with(|w| {
         *w.borrow_mut() = Some(AppWidgets {
-            search: search.clone(),
-            listbox: listbox.clone(),
-            status: status.clone(),
-            mode_label: mode_label.clone(),
-            tab_bar: tab_bar.clone(),
-            section_label: section_label.clone(),
-            entries: entries.clone(),
-            pinned: pinned.clone(),
+            window,
+            search,
+            listbox,
+            scroll,
+            status,
+            mode_label,
+            tab_bar,
+            section_label,
+            entries: Rc::new(RefCell::new(Vec::new())),
+            pinned: Rc::new(RefCell::new(Vec::new())),
         });
     });
+}
 
-    {
-        let mut ents = entries.borrow_mut();
-        *ents = fetch_entries(cfg.max_items);
-        drop(ents);
+// ---------------------------------------------------------------------------
+// Keys
+// ---------------------------------------------------------------------------
 
-        let mut pins = pinned.borrow_mut();
-        *pins = load_pinned();
-        drop(pins);
-    }
-
-    refresh_list(&cfg);
-
-    window.present();
-
+fn on_key(key: gdk4::Key, mods: gdk4::ModifierType) -> glib::Propagation {
+    let cfg = cfg();
     if cfg.vim_mode {
-        listbox.grab_focus();
+        on_key_vim(key, mods)
     } else {
-        search.grab_focus();
+        on_key_normal(&cfg, key, mods)
+    }
+}
+
+/// Non-vim: only configured combos act. Plain letters (p, u, ...) are never
+/// actions here (see common::keys::match_action), they type into search.
+fn on_key_normal(cfg: &Config, key: gdk4::Key, mods: gdk4::ModifierType) -> glib::Propagation {
+    let Some(action) = match_action(&cfg.base.keybinds, key, mods) else {
+        return glib::Propagation::Proceed;
+    };
+    match action {
+        Action::Close => hide(),
+        Action::Select => handle_select(),
+        Action::Delete => handle_delete(),
+        Action::Pin => handle_pin(),
+        Action::Unpin => handle_unpin(),
+        Action::ClearSearch => clear_search(),
+        Action::Next => navigate(Nav::By(1)),
+        Action::Prev => navigate(Nav::By(-1)),
+        Action::PageDown => navigate(Nav::By(PAGE)),
+        Action::PageUp => navigate(Nav::By(-PAGE)),
+        Action::First => navigate(Nav::First),
+        Action::Last => navigate(Nav::Last),
+        Action::TabSwitch => toggle_tab(),
+    }
+    glib::Propagation::Stop
+}
+
+/// Vim: Normal mode owns single-letter commands (p/u/dd/j/k/gg/G), Insert mode
+/// types into search.
+fn on_key_vim(key: gdk4::Key, mods: gdk4::ModifierType) -> glib::Propagation {
+    let tab_switch = (key == gdk4::Key::Tab || key == gdk4::Key::ISO_Left_Tab)
+        && mods.intersects(gdk4::ModifierType::CONTROL_MASK | gdk4::ModifierType::ALT_MASK);
+    if tab_switch {
+        toggle_tab();
+        return glib::Propagation::Stop;
     }
 
+    match get_vim_mode() {
+        VimMode::Normal => {
+            if let Some(action) = handle_vim_normal_key(key, mods, true, true) {
+                match action {
+                    VimAction::Close => hide(),
+                    VimAction::Select => handle_select(),
+                    VimAction::Delete => handle_delete(),
+                    VimAction::Pin => handle_pin(),
+                    VimAction::Unpin => handle_unpin(),
+                    VimAction::TabSwitch => toggle_tab(),
+                    VimAction::EnterInsert => {
+                        set_vim_mode(VimMode::Insert);
+                        with_wg(|wg| {
+                            update_mode_display(&wg.mode_label, VimMode::Insert);
+                            wg.search.grab_focus();
+                        });
+                    }
+                    VimAction::Down => navigate(Nav::By(1)),
+                    VimAction::Up => navigate(Nav::By(-1)),
+                    VimAction::Top => navigate(Nav::First),
+                    VimAction::Bottom => navigate(Nav::Last),
+                    VimAction::HalfPageDown => navigate(Nav::By(PAGE)),
+                    VimAction::HalfPageUp => navigate(Nav::By(-PAGE)),
+                    VimAction::ExitInsert => {}
+                }
+            }
+            // Normal mode swallows everything else (no typing into search)
+            glib::Propagation::Stop
+        }
+        VimMode::Insert => {
+            if handle_vim_insert_key(key) == Some(VimAction::ExitInsert) {
+                set_vim_mode(VimMode::Normal);
+                with_wg(|wg| {
+                    update_mode_display(&wg.mode_label, VimMode::Normal);
+                    wg.listbox.grab_focus();
+                });
+                return glib::Propagation::Stop;
+            }
+            if key == gdk4::Key::Return || key == gdk4::Key::KP_Enter {
+                handle_select();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry points
+// ---------------------------------------------------------------------------
+
+pub fn activate(app: &Application) {
+    if WIDGETS.with(|w| w.borrow().is_some()) {
+        toggle_window();
+        return;
+    }
+    let cfg = Config::load();
+    CONFIG.with(|c| *c.borrow_mut() = cfg.clone());
+    build_window(app, &cfg);
+    show_window();
     log(
         APP_NAME,
         &format!(
@@ -772,71 +658,17 @@ pub fn activate(app: &Application) {
     );
 }
 
-pub fn setup_signals(app: &Application) {
-    glib::unix_signal_add_local(libc::SIGUSR1, {
-        let app = app.clone();
-        move || {
-            let cfg = Config::load();
-            CONFIG.with(|c| *c.borrow_mut() = cfg.clone());
-
-            if let Some(win) = app.active_window() {
-                if win.is_visible() {
-                    win.set_visible(false);
-                } else {
-                    if cfg.base.anchor == Anchor::Cursor {
-                        update_cursor_position(&win);
-                    }
-
-                    if cfg.vim_mode {
-                        set_vim_mode(VimMode::Normal);
-                    }
-
-                    set_current_tab(Tab::Recent);
-
-                    WIDGETS.with(|w| {
-                        if let Some(ref wg) = *w.borrow() {
-                            let mut entries = wg.entries.borrow_mut();
-                            *entries = fetch_entries(cfg.max_items);
-                            drop(entries);
-
-                            let mut pinned = wg.pinned.borrow_mut();
-                            *pinned = load_pinned();
-                            drop(pinned);
-
-                            wg.search.set_text("");
-
-                            if cfg.vim_mode {
-                                update_mode_display(&wg.mode_label, VimMode::Normal);
-                                wg.listbox.grab_focus();
-                            } else {
-                                wg.search.grab_focus();
-                            }
-                        }
-                    });
-
-                    refresh_list(&cfg);
-                    win.set_visible(true);
-                    win.present();
-                }
-            }
-            glib::ControlFlow::Continue
-        }
+pub fn setup_signals(_app: &Application) {
+    glib::unix_signal_add_local(libc::SIGUSR1, || {
+        toggle_window();
+        glib::ControlFlow::Continue
     });
 
-    glib::unix_signal_add_local(libc::SIGUSR2, {
-        move || {
-            let cfg = Config::load();
-            CONFIG.with(|c| *c.borrow_mut() = cfg.clone());
-
-            let provider = CssProvider::new();
-            provider.load_from_data(&load_css(APP_NAME, &cfg.base.theme, default_css()));
-            gtk4::style_context_add_provider_for_display(
-                &gdk4::Display::default().expect("no display"),
-                &provider,
-                gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
-            );
-            log(APP_NAME, "config + css reloaded");
-            glib::ControlFlow::Continue
-        }
+    glib::unix_signal_add_local(libc::SIGUSR2, || {
+        let cfg = Config::load();
+        apply_css(&css_for(&cfg));
+        CONFIG.with(|c| *c.borrow_mut() = cfg);
+        log(APP_NAME, "config + css reloaded");
+        glib::ControlFlow::Continue
     });
 }

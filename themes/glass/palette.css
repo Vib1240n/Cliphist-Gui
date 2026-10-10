@@ -1,0 +1,22 @@
+/* ===========================================================================
+ * glass - palette (graphite: neutral glass, no hue)
+ * Built-in and read-only. To customise:
+ *   rw theme glass [--global]     /   launch-gui --theme glass [--global]
+ * which copies this file to ~/.config/<app or rustapp-theme>/themes/glass/
+ * for you to edit. Every stylesheet refers to these names only, never hex.
+ * Keep the surfaces translucent: blur needs alpha above the layer rule's
+ * ignore_alpha (0.25).
+ * ===========================================================================*/
+
+@define-color bg        #121314;   /* window/root surface tint            */
+@define-color surface   #27292c;   /* cards, controls                     */
+@define-color fg        #f4f5f6;   /* text, highlights (used with alpha)  */
+@define-color border    #5c5f63;   /* hairlines                           */
+@define-color shadow    #000000;   /* bottom edges, knob shadows          */
+
+@define-color accent    #d6dae0;   /* graphite: soft white, no colour     */
+@define-color accent_fg #121314;   /* text/icons on a solid accent fill   */
+
+@define-color red       #e8a0a8;
+@define-color yellow    #e8cf8f;
+@define-color green     #a8cfa0;

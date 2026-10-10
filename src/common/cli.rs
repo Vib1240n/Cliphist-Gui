@@ -71,6 +71,19 @@ pub fn remove_pid(pidfile: &str) {
     let _ = std::fs::remove_file(pidfile);
 }
 
+/// Spawn a short-lived helper (notify-send, wl-copy, ...) and reap it on a
+/// background thread so it never lingers as a zombie of the daemon.
+pub fn spawn_reaped(mut cmd: Command) {
+    match cmd.spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(e) => eprintln!("spawn failed: {e}"),
+    }
+}
+
 /// Get pidfile path for an app
 pub fn pidfile_path(app_name: &str) -> String {
     format!("/tmp/{}-{}.pid", app_name, unsafe { libc::getuid() })

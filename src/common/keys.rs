@@ -91,6 +91,11 @@ pub fn parse_single_combo(s: &str) -> Option<KeyCombo> {
     Some(KeyCombo { key, mods })
 }
 
+/// Match a key press against the configured keybinds (non-vim mode).
+///
+/// Plain printable keys (letters, digits, punctuation, with or without Shift)
+/// never match here: in non-vim mode the search entry has focus and those keys
+/// must reach it as text. Single-letter actions (p/u/dd/j/k...) are vim-mode only.
 pub fn match_action(
     keybinds: &HashMap<Action, Vec<KeyCombo>>,
     key: gdk4::Key,
@@ -102,14 +107,34 @@ pub fn match_action(
         | gdk4::ModifierType::SUPER_MASK;
     let pressed = mods & relevant;
 
+    let command_mods = gdk4::ModifierType::CONTROL_MASK
+        | gdk4::ModifierType::ALT_MASK
+        | gdk4::ModifierType::SUPER_MASK;
+    if !pressed.intersects(command_mods) && is_text_key(key) {
+        return None;
+    }
+
+    // Shift turns `u` into `U` and Tab into ISO_Left_Tab in the event, but
+    // configs write `Ctrl+Shift+u` / `Shift+Tab`
+    let key = if key == gdk4::Key::ISO_Left_Tab {
+        gdk4::Key::Tab
+    } else {
+        key.to_lower()
+    };
     for (action, combos) in keybinds {
         for combo in combos {
-            if combo.key == key && combo.mods == pressed {
+            if combo.key.to_lower() == key && combo.mods == pressed {
                 return Some(action.clone());
             }
         }
     }
     None
+}
+
+/// Key that types a visible character (space included).
+fn is_text_key(key: gdk4::Key) -> bool {
+    key.to_unicode()
+        .is_some_and(|c| c.is_alphanumeric() || c.is_ascii_punctuation() || c == ' ')
 }
 
 /// Get the character for a key press (for vim mode)
@@ -206,6 +231,33 @@ pub fn default_keybinds() -> HashMap<Action, Vec<KeyCombo>> {
             key: gdk4::Key::End,
             mods: gdk4::ModifierType::empty(),
         }],
+    );
+    kb.insert(
+        Action::Pin,
+        vec![KeyCombo {
+            key: gdk4::Key::p,
+            mods: gdk4::ModifierType::CONTROL_MASK,
+        }],
+    );
+    kb.insert(
+        Action::Unpin,
+        vec![KeyCombo {
+            key: gdk4::Key::u,
+            mods: gdk4::ModifierType::CONTROL_MASK | gdk4::ModifierType::SHIFT_MASK,
+        }],
+    );
+    kb.insert(
+        Action::TabSwitch,
+        vec![
+            KeyCombo {
+                key: gdk4::Key::Tab,
+                mods: gdk4::ModifierType::CONTROL_MASK,
+            },
+            KeyCombo {
+                key: gdk4::Key::Tab,
+                mods: gdk4::ModifierType::ALT_MASK,
+            },
+        ],
     );
     kb
 }

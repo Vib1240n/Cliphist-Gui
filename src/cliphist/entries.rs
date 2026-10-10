@@ -1,46 +1,30 @@
 use crate::config::APP_NAME;
+use common::cli::spawn_reaped;
 use common::css::char_truncate;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use common::logging::log;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::io::Write;
-use std::path::Path;
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 const THUMB_SIZE: u32 = 64;
+const PREVIEW_CHARS: usize = 200;
 
-#[derive(Clone, Debug)]
-pub struct PinnedMeta {
-    pub hash: String,
-    pub content_type: String,
-    pub preview: String,
-    pub pinned_at: u64,
-    pub order: usize,
-}
+// ---------------------------------------------------------------------------
+// Hashing
+// ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
-pub struct PinnedClipEntry {
-    pub meta: PinnedMeta,
-    pub thumb_path: Option<PathBuf>,
-    pub data_path: PathBuf,
-}
-
-pub fn pinned_dir() -> PathBuf {
-    let d = common::paths::config_dir(APP_NAME).join("pinned");
-    std::fs::create_dir_all(&d).ok();
-    std::fs::create_dir_all(d.join("text")).ok();
-    std::fs::create_dir_all(d.join("media")).ok();
-    d
-}
-
-fn index_path() -> PathBuf {
-    pinned_dir().join("index.json")
-}
-
-fn compute_hash(data: &[u8]) -> String {
-    let mut hasher = DefaultHasher::new();
-    data.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+/// FNV-1a 64-bit. Stable across Rust versions and platforms. The previous
+/// `DefaultHasher` is explicitly not, so a toolchain update silently changed
+/// every pin's identity.
+pub fn stable_hash(data: &[u8]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in data {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{:016x}", h)
 }
 
 fn now_timestamp() -> u64 {
@@ -50,200 +34,232 @@ fn now_timestamp() -> u64 {
         .as_secs()
 }
 
-fn parse_index() -> Vec<PinnedMeta> {
-    let path = index_path();
-    if !path.exists() {
-        return Vec::new();
-    }
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    parse_index_json(&content)
+fn text_preview(data: &[u8]) -> String {
+    char_truncate(&String::from_utf8_lossy(data), PREVIEW_CHARS)
 }
 
-fn parse_index_json(content: &str) -> Vec<PinnedMeta> {
-    let mut entries = Vec::new();
-    let content = content.trim();
-    if !content.starts_with('[') {
-        return entries;
+// ---------------------------------------------------------------------------
+// Pinned storage: ~/.config/cliphist-gui/pinned/{index.json,text/,media/}
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PinnedMeta {
+    pub hash: String,
+    pub content_type: String,
+    #[serde(default)]
+    pub preview: String,
+    #[serde(default)]
+    pub pinned_at: u64,
+    #[serde(default)]
+    pub order: usize,
+}
+
+impl PinnedMeta {
+    pub fn is_image(&self) -> bool {
+        self.content_type == "image"
     }
-    let inner = &content[1..content.len().saturating_sub(1)];
-    for obj in inner.split("},") {
-        let obj = obj.trim().trim_start_matches('{').trim_end_matches('}');
-        let mut hash = String::new();
-        let mut content_type = String::new();
-        let mut preview = String::new();
-        let mut pinned_at: u64 = 0;
-        let mut order: usize = 0;
-        for part in obj.split(',') {
-            if let Some((k, v)) = part.split_once(':') {
-                let key = k.trim().trim_matches('"');
-                let val = v.trim().trim_matches('"');
-                match key {
-                    "hash" => hash = val.to_string(),
-                    "content_type" => content_type = val.to_string(),
-                    "preview" => preview = val.replace("\\n", "\n").replace("\\\"", "\""),
-                    "pinned_at" => pinned_at = val.parse().unwrap_or(0),
-                    "order" => order = val.parse().unwrap_or(0),
-                    _ => {}
-                }
+}
+
+#[derive(Clone, Debug)]
+pub struct PinnedClipEntry {
+    pub meta: PinnedMeta,
+    /// Where the thumbnail lives (or will, once the background worker makes it)
+    pub thumb_path: Option<PathBuf>,
+    pub data_path: PathBuf,
+}
+
+pub fn pinned_dir() -> PathBuf {
+    let d = common::paths::config_dir(APP_NAME).join("pinned");
+    std::fs::create_dir_all(d.join("text")).ok();
+    std::fs::create_dir_all(d.join("media")).ok();
+    d
+}
+
+fn index_path() -> PathBuf {
+    pinned_dir().join("index.json")
+}
+
+fn data_path(dir: &Path, content_type: &str, hash: &str) -> PathBuf {
+    if content_type == "image" {
+        dir.join("media").join(format!("{hash}.png"))
+    } else {
+        dir.join("text").join(format!("{hash}.txt"))
+    }
+}
+
+fn pinned_thumb_path(hash: &str) -> PathBuf {
+    thumb_cache().join(format!("pinned_{hash}.png"))
+}
+
+/// Read index.json. If it is missing or unparseable, rebuild it from the data
+/// files so pins are never lost to a bad index.
+fn read_index() -> Vec<PinnedMeta> {
+    let path = index_path();
+    match std::fs::read_to_string(&path) {
+        Ok(s) => match serde_json::from_str::<Vec<PinnedMeta>>(&s) {
+            Ok(v) => v,
+            Err(e) => {
+                log(APP_NAME, &format!("index.json unreadable ({e}), rebuilding from files"));
+                let _ = std::fs::copy(&path, path.with_extension("json.broken"));
+                rebuild_index_from_files()
             }
-        }
-        if !hash.is_empty() {
-            entries.push(PinnedMeta {
-                hash,
-                content_type,
+        },
+        Err(_) => rebuild_index_from_files(),
+    }
+}
+
+fn rebuild_index_from_files() -> Vec<PinnedMeta> {
+    let dir = pinned_dir();
+    let mut out = Vec::new();
+    for (sub, ctype) in [("text", "text"), ("media", "image")] {
+        let Ok(rd) = std::fs::read_dir(dir.join(sub)) else { continue };
+        for f in rd.flatten() {
+            let p = f.path();
+            let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else { continue };
+            let preview = if ctype == "text" {
+                std::fs::read(&p).map(|d| text_preview(&d)).unwrap_or_default()
+            } else {
+                "[[ pinned image ]]".to_string()
+            };
+            let pinned_at = f
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs());
+            out.push(PinnedMeta {
+                hash: stem.to_string(),
+                content_type: ctype.to_string(),
                 preview,
                 pinned_at,
-                order,
+                order: 0,
             });
         }
     }
-    entries.sort_by_key(|e| e.order);
-    entries
+    out.sort_by_key(|m| m.pinned_at);
+    out
 }
 
 fn save_index(entries: &[PinnedMeta]) {
-    let mut json = String::from("[\n");
-    for (i, e) in entries.iter().enumerate() {
-        let preview_escaped = e
-            .preview
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n");
-        json.push_str(&format!(
-            "  {{\"hash\":\"{}\",\"content_type\":\"{}\",\"preview\":\"{}\",\"pinned_at\":{},\"order\":{}}}",
-            e.hash, e.content_type, preview_escaped, e.pinned_at, e.order
-        ));
-        if i < entries.len() - 1 {
-            json.push(',');
+    let path = index_path();
+    let tmp = path.with_extension("json.tmp");
+    match serde_json::to_string_pretty(entries) {
+        Ok(json) => {
+            if std::fs::write(&tmp, json).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
         }
-        json.push('\n');
+        Err(e) => log(APP_NAME, &format!("index.json serialize failed: {e}")),
     }
-    json.push(']');
-    let _ = std::fs::write(index_path(), json);
+}
+
+/// Load the index and repair it in place:
+/// - re-key every pin by `stable_hash` of its data (migrates old DefaultHasher keys)
+/// - regenerate text previews from the stored data (fixes previews the old
+///   hand-rolled parser truncated)
+/// - drop entries whose data file is gone, and duplicates
+/// - renumber `order` 0..n
+fn load_index() -> Vec<PinnedMeta> {
+    let dir = pinned_dir();
+    let mut metas = read_index();
+    metas.sort_by_key(|m| (m.order, m.pinned_at));
+
+    let mut changed = false;
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(metas.len());
+
+    for mut m in metas {
+        let path = data_path(&dir, &m.content_type, &m.hash);
+        let Ok(data) = std::fs::read(&path) else {
+            changed = true;
+            continue;
+        };
+        let h = stable_hash(&data);
+        if h != m.hash {
+            let new_path = data_path(&dir, &m.content_type, &h);
+            if std::fs::rename(&path, &new_path).is_err() {
+                continue;
+            }
+            let _ = std::fs::remove_file(pinned_thumb_path(&m.hash));
+            log(APP_NAME, &format!("migrated pin {} -> {}", m.hash, h));
+            m.hash = h;
+            changed = true;
+        }
+        if !m.is_image() {
+            let p = text_preview(&data);
+            if p != m.preview {
+                m.preview = p;
+                changed = true;
+            }
+        }
+        if !seen.insert(m.hash.clone()) {
+            changed = true;
+            continue;
+        }
+        out.push(m);
+    }
+
+    for (i, m) in out.iter_mut().enumerate() {
+        if m.order != i {
+            m.order = i;
+            changed = true;
+        }
+    }
+    if changed {
+        save_index(&out);
+    }
+    out
 }
 
 pub fn load_pinned() -> Vec<PinnedClipEntry> {
-    let metas = parse_index();
     let dir = pinned_dir();
-    let cache = thumb_cache();
-
-    metas
+    load_index()
         .into_iter()
-        .filter_map(|meta| {
-            let data_path = if meta.content_type == "image" {
-                dir.join("media").join(format!("{}.png", meta.hash))
-            } else {
-                dir.join("text").join(format!("{}.txt", meta.hash))
-            };
-            if !data_path.exists() {
-                return None;
-            }
-            let thumb_path = if meta.content_type == "image" {
-                let tp = cache.join(format!("pinned_{}.png", meta.hash));
-                if !tp.exists() {
-                    generate_pinned_thumbnail(&data_path, &tp);
-                }
-                if tp.exists() {
-                    Some(tp)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            Some(PinnedClipEntry {
-                meta,
-                thumb_path,
-                data_path,
-            })
+        .map(|meta| PinnedClipEntry {
+            data_path: data_path(&dir, &meta.content_type, &meta.hash),
+            thumb_path: meta.is_image().then(|| pinned_thumb_path(&meta.hash)),
+            meta,
         })
         .collect()
 }
 
-fn generate_pinned_thumbnail(src: &Path, out_path: &Path) {
-    let data = match std::fs::read(src) {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-    let mut m = match Command::new("magick")
-        .args([
-            "png:-",
-            "-resize",
-            &format!("{}x{}^", THUMB_SIZE * 2, THUMB_SIZE * 2),
-            &format!("png:{}", out_path.display()),
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    if let Some(mut si) = m.stdin.take() {
-        let _ = si.write_all(&data);
-        drop(si);
-    }
-    let _ = m.wait();
-}
-
 pub fn pin_entry(entry: &ClipEntry, max_pinned: usize) -> Result<(), String> {
-    let mut metas = parse_index();
-
+    let mut metas = load_index();
     if metas.len() >= max_pinned {
-        return Err(format!("Maximum {} pinned items reached", max_pinned));
+        return Err(format!("Maximum {max_pinned} pinned items reached"));
     }
 
     let data = decode_entry(entry)?;
-    let hash = compute_hash(&data);
-
+    let hash = stable_hash(&data);
     if metas.iter().any(|m| m.hash == hash) {
         return Err("Already pinned".to_string());
     }
 
-    let dir = pinned_dir();
-    let (content_type, data_path) = if entry.is_image {
-        let p = dir.join("media").join(format!("{}.png", hash));
-        ("image".to_string(), p)
-    } else {
-        let p = dir.join("text").join(format!("{}.txt", hash));
-        ("text".to_string(), p)
-    };
+    let content_type = if entry.is_image { "image" } else { "text" };
+    std::fs::write(data_path(&pinned_dir(), content_type, &hash), &data).map_err(|e| e.to_string())?;
 
-    std::fs::write(&data_path, &data).map_err(|e| e.to_string())?;
-
-    let order = metas.len();
     metas.push(PinnedMeta {
         hash,
-        content_type,
-        preview: entry.preview.clone(),
+        content_type: content_type.to_string(),
+        preview: if entry.is_image {
+            entry.preview.clone()
+        } else {
+            text_preview(&data)
+        },
         pinned_at: now_timestamp(),
-        order,
+        order: metas.len(),
     });
-
     save_index(&metas);
     Ok(())
 }
 
 pub fn unpin_entry(hash: &str) {
-    let mut metas = parse_index();
     let dir = pinned_dir();
-
-    if let Some(meta) = metas.iter().find(|m| m.hash == hash) {
-        let data_path = if meta.content_type == "image" {
-            dir.join("media").join(format!("{}.png", hash))
-        } else {
-            dir.join("text").join(format!("{}.txt", hash))
-        };
-        let _ = std::fs::remove_file(data_path);
-
-        let thumb = thumb_cache().join(format!("pinned_{}.png", hash));
-        let _ = std::fs::remove_file(thumb);
+    let mut metas = load_index();
+    if let Some(m) = metas.iter().find(|m| m.hash == hash) {
+        let _ = std::fs::remove_file(data_path(&dir, &m.content_type, hash));
+        let _ = std::fs::remove_file(pinned_thumb_path(hash));
     }
-
     metas.retain(|m| m.hash != hash);
     for (i, m) in metas.iter_mut().enumerate() {
         m.order = i;
@@ -251,107 +267,61 @@ pub fn unpin_entry(hash: &str) {
     save_index(&metas);
 }
 
-pub fn reorder_pinned(hashes: &[String]) {
-    let metas = parse_index();
-    let mut new_metas = Vec::new();
-
-    for (i, hash) in hashes.iter().enumerate() {
-        if let Some(mut m) = metas.iter().find(|m| &m.hash == hash).cloned() {
-            m.order = i;
-            new_metas.push(m);
-        }
-    }
-
-    save_index(&new_metas);
-}
-
-pub fn is_pinned(entry: &ClipEntry) -> bool {
-    let data = match decode_entry(entry) {
-        Ok(d) => d,
-        Err(_) => return false,
+/// Drag-and-drop reorder: move `source` to `target`'s position.
+pub fn move_pinned(source: &str, target: &str) {
+    let mut metas = load_index();
+    let (Some(from), Some(to)) = (
+        metas.iter().position(|m| m.hash == source),
+        metas.iter().position(|m| m.hash == target),
+    ) else {
+        return;
     };
-    let hash = compute_hash(&data);
-    parse_index().iter().any(|m| m.hash == hash)
+    let m = metas.remove(from);
+    metas.insert(to, m);
+    for (i, m) in metas.iter_mut().enumerate() {
+        m.order = i;
+    }
+    save_index(&metas);
 }
 
+/// Hash of a cliphist entry if its content is pinned (decodes it once).
 pub fn get_pinned_hash(entry: &ClipEntry) -> Option<String> {
-    let data = decode_entry(entry).ok()?;
-    let hash = compute_hash(&data);
-    if parse_index().iter().any(|m| m.hash == hash) {
-        Some(hash)
-    } else {
-        None
-    }
+    let hash = stable_hash(&decode_entry(entry).ok()?);
+    load_index().iter().any(|m| m.hash == hash).then_some(hash)
 }
 
-fn decode_entry(entry: &ClipEntry) -> Result<Vec<u8>, String> {
-    let mut dec = Command::new("cliphist")
-        .arg("decode")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-
-    if let Some(mut si) = dec.stdin.take() {
-        let _ = si.write_all(entry.raw_line.as_bytes());
-        drop(si);
-    }
-
-    let out = dec.wait_with_output().map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(out.stdout)
-    } else {
-        Err("Decode failed".to_string())
-    }
-}
-
-pub fn select_pinned(entry: &PinnedClipEntry, notify: bool) {
-    let data = match std::fs::read(&entry.data_path) {
-        Ok(d) => d,
-        Err(_) => return,
+pub fn select_pinned(entry: &PinnedClipEntry, notify: bool) -> bool {
+    let Ok(data) = std::fs::read(&entry.data_path) else {
+        log(APP_NAME, &format!("pinned data missing: {}", entry.data_path.display()));
+        return false;
     };
-
-    let mime = if entry.meta.content_type == "image" {
-        "image/png"
-    } else {
-        "text/plain"
-    };
-
-    let mut wl = match Command::new("wl-copy")
-        .args(["--type", mime])
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-
-    if let Some(mut si) = wl.stdin.take() {
-        let _ = si.write_all(&data);
-        drop(si);
+    let mime = if entry.meta.is_image() { "image/png" } else { "text/plain" };
+    if !wl_copy(&data, mime) {
+        return false;
     }
-    let _ = wl.wait();
-
     if notify {
-        let msg = if entry.meta.content_type == "image" {
+        let msg = if entry.meta.is_image() {
             "Pinned image copied".to_string()
         } else {
             format!("Copied: {}", char_truncate(&entry.meta.preview, 50))
         };
-        let _ = Command::new("notify-send")
-            .args(["-t", "2000", APP_NAME, &msg])
-            .spawn();
+        notify_send(&msg);
     }
+    true
 }
 
+// ---------------------------------------------------------------------------
+// cliphist entries
+// ---------------------------------------------------------------------------
+
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct ClipEntry {
     pub raw_line: String,
     pub id: String,
     pub preview: String,
     pub is_image: bool,
+    /// Where the thumbnail lives (or will, once the background worker makes it).
+    /// Keyed by the cliphist line, not the id: ids restart after `cliphist wipe`.
     pub thumb_path: Option<PathBuf>,
 }
 
@@ -361,182 +331,242 @@ pub fn thumb_cache() -> PathBuf {
     d
 }
 
+/// Fast: one `cliphist list`, no decoding. Thumbnails come from the worker.
 pub fn fetch_entries(max_items: usize) -> Vec<ClipEntry> {
     let output = match Command::new("cliphist").arg("list").output() {
         Ok(o) => o,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            log(APP_NAME, &format!("cliphist list failed: {e}"));
+            return Vec::new();
+        }
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let cache = thumb_cache();
+    let limit = if max_items > 0 { max_items } else { usize::MAX };
 
-    let iter = stdout.lines().filter(|l| !l.is_empty());
-    let iter: Box<dyn Iterator<Item = &str>> = if max_items > 0 {
-        Box::new(iter.take(max_items))
-    } else {
-        Box::new(iter)
-    };
-
-    iter.filter_map(|line| {
-        let raw_line = line.to_string();
-        let (id, preview) = match line.split_once('\t') {
-            Some((i, p)) => (i.trim().to_string(), p.to_string()),
-            None => (line.to_string(), line.to_string()),
-        };
-
-        // Skip HTML meta/img tags from browser image copies
-        if is_browser_html_junk(&preview) {
-            return None;
-        }
-
-        let is_image = preview.contains("[[ binary data");
-        let thumb_path = if is_image {
-            let path = cache.join(format!("{}.png", id));
-            if !path.exists() {
-                generate_thumbnail(&raw_line, &path);
+    stdout
+        .lines()
+        .filter(|l| !l.is_empty())
+        .filter_map(|line| {
+            let (id, preview) = match line.split_once('\t') {
+                Some((i, p)) => (i.trim().to_string(), p.to_string()),
+                None => (line.to_string(), line.to_string()),
+            };
+            if is_browser_html_junk(&preview) {
+                return None;
             }
-            if path.exists() {
-                Some(path)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        Some(ClipEntry {
-            raw_line,
-            id,
-            preview,
-            is_image,
-            thumb_path,
+            let is_image = preview.contains("[[ binary data");
+            let thumb_path =
+                is_image.then(|| cache.join(format!("{}.png", stable_hash(line.as_bytes()))));
+            Some(ClipEntry {
+                raw_line: line.to_string(),
+                id,
+                preview,
+                is_image,
+                thumb_path,
+            })
         })
-    })
-    .collect()
+        .take(limit)
+        .collect()
 }
 
-/// Check if content is HTML junk from browser image copy
+/// HTML junk that browsers put on the clipboard alongside a copied image
 fn is_browser_html_junk(preview: &str) -> bool {
     let p = preview.trim();
-    // HTML meta tag followed by img tag (browser image copy pattern)
-    if p.starts_with("<meta ") && p.contains("<img ") {
-        return true;
-    }
-    // Just a meta content-type tag
-    if p.starts_with("<meta http-equiv=\"content-type\"") && p.len() < 200 {
-        return true;
-    }
-    false
+    (p.starts_with("<meta ") && p.contains("<img "))
+        || (p.starts_with("<meta http-equiv=\"content-type\"") && p.len() < 200)
 }
 
-pub fn generate_thumbnail(raw_line: &str, out_path: &Path) {
-    let mut child = match Command::new("cliphist")
-        .arg("decode")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-
-    if let Some(mut si) = child.stdin.take() {
-        let _ = si.write_all(raw_line.as_bytes());
-        drop(si);
-    }
-
-    let out = match child.wait_with_output() {
-        Ok(o) => o,
-        Err(_) => return,
-    };
-    if !out.status.success() || out.stdout.is_empty() {
-        return;
-    }
-
-    let mut m = match Command::new("magick")
-        .args([
-            "png:-",
-            "-resize",
-            &format!("{}x{}^", THUMB_SIZE * 2, THUMB_SIZE * 2),
-            &format!("png:{}", out_path.display()),
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-
-    if let Some(mut si) = m.stdin.take() {
-        let _ = si.write_all(&out.stdout);
-        drop(si);
-    }
-    let _ = m.wait();
-}
-
-pub fn select_entry(entry: &ClipEntry, notify: bool) {
-    let mut dec = Command::new("cliphist")
-        .arg("decode")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("cliphist decode failed");
-
-    if let Some(mut si) = dec.stdin.take() {
-        let _ = si.write_all(entry.raw_line.as_bytes());
-        drop(si);
-    }
-
-    if let Ok(out) = dec.wait_with_output() {
-        if out.status.success() {
-            let mime = if entry.is_image {
-                "image/png"
-            } else {
-                "text/plain"
-            };
-            let mut wl = Command::new("wl-copy")
-                .args(["--type", mime])
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-                .expect("wl-copy failed");
-            if let Some(mut si) = wl.stdin.take() {
-                let _ = si.write_all(&out.stdout);
-                drop(si);
-            }
-            let _ = wl.wait();
-
-            if notify {
-                let msg = if entry.is_image {
-                    "Image copied".to_string()
-                } else {
-                    format!("Copied: {}", char_truncate(&entry.preview, 50))
-                };
-                let _ = Command::new("notify-send")
-                    .args(["-t", "2000", APP_NAME, &msg])
-                    .spawn();
-            }
+pub fn select_entry(entry: &ClipEntry, notify: bool) -> bool {
+    let data = match decode_entry(entry) {
+        Ok(d) => d,
+        Err(e) => {
+            log(APP_NAME, &format!("select failed: {e}"));
+            return false;
         }
+    };
+    let mime = if entry.is_image { "image/png" } else { "text/plain" };
+    if !wl_copy(&data, mime) {
+        return false;
     }
+    if notify {
+        let msg = if entry.is_image {
+            "Image copied".to_string()
+        } else {
+            format!("Copied: {}", char_truncate(&entry.preview, 50))
+        };
+        notify_send(&msg);
+    }
+    true
 }
 
 pub fn delete_entry(entry: &ClipEntry) {
-    if let Ok(mut c) = Command::new("cliphist")
-        .arg("delete")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-    {
-        if let Some(mut si) = c.stdin.take() {
-            let _ = si.write_all(entry.raw_line.as_bytes());
-            drop(si);
+    match Command::new("cliphist").arg("delete").stdin(Stdio::piped()).spawn() {
+        Ok(mut c) => {
+            if let Some(mut si) = c.stdin.take() {
+                let _ = si.write_all(entry.raw_line.as_bytes());
+            }
+            let _ = c.wait();
         }
-        let _ = c.wait();
+        Err(e) => log(APP_NAME, &format!("cliphist delete failed: {e}")),
     }
     if let Some(ref p) = entry.thumb_path {
         let _ = std::fs::remove_file(p);
     }
 }
+
+fn decode_entry(entry: &ClipEntry) -> Result<Vec<u8>, String> {
+    pipe_through(Command::new("cliphist").arg("decode"), entry.raw_line.as_bytes())
+}
+
+/// Run `cmd`, feed `input` on stdin, return stdout.
+fn pipe_through(cmd: &mut Command, input: &[u8]) -> Result<Vec<u8>, String> {
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    if let Some(mut si) = child.stdin.take() {
+        let _ = si.write_all(input);
+    }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if out.status.success() && !out.stdout.is_empty() {
+        Ok(out.stdout)
+    } else {
+        Err("command failed".to_string())
+    }
+}
+
+/// Run `cmd` with `input` on stdin, discard output, report success.
+fn feed(cmd: &mut Command, input: &[u8]) -> bool {
+    let Ok(mut child) = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    if let Some(mut si) = child.stdin.take() {
+        let _ = si.write_all(input);
+    }
+    child.wait().is_ok_and(|s| s.success())
+}
+
+fn wl_copy(data: &[u8], mime: &str) -> bool {
+    // wl-copy forks its own server and exits once stdin is read
+    match Command::new("wl-copy").args(["--type", mime]).stdin(Stdio::piped()).spawn() {
+        Ok(mut c) => {
+            if let Some(mut si) = c.stdin.take() {
+                let _ = si.write_all(data);
+            }
+            let _ = c.wait();
+            true
+        }
+        Err(e) => {
+            log(APP_NAME, &format!("wl-copy failed: {e}"));
+            false
+        }
+    }
+}
+
+fn notify_send(msg: &str) {
+    let mut cmd = Command::new("notify-send");
+    cmd.args(["-t", "2000", APP_NAME, msg]);
+    spawn_reaped(cmd);
+}
+
+// ---------------------------------------------------------------------------
+// Thumbnails (background worker)
+// ---------------------------------------------------------------------------
+
+pub enum ThumbSource {
+    /// cliphist list line, decoded with `cliphist decode`
+    Cliphist(String),
+    /// pinned image file
+    File(PathBuf),
+}
+
+pub struct ThumbJob {
+    pub source: ThumbSource,
+    pub out: PathBuf,
+}
+
+/// Thumbnails that still need generating. Cheap: only stat()s.
+pub fn thumb_jobs(entries: &[ClipEntry], pinned: &[PinnedClipEntry]) -> Vec<ThumbJob> {
+    let mut jobs = Vec::new();
+    for p in pinned {
+        if let Some(out) = &p.thumb_path {
+            if !out.exists() {
+                jobs.push(ThumbJob { source: ThumbSource::File(p.data_path.clone()), out: out.clone() });
+            }
+        }
+    }
+    for e in entries {
+        if let Some(out) = &e.thumb_path {
+            if !out.exists() {
+                jobs.push(ThumbJob { source: ThumbSource::Cliphist(e.raw_line.clone()), out: out.clone() });
+            }
+        }
+    }
+    jobs
+}
+
+/// Every thumbnail still in use; anything else in the cache gets pruned.
+pub fn thumb_keep_set(entries: &[ClipEntry], pinned: &[PinnedClipEntry]) -> HashSet<PathBuf> {
+    entries
+        .iter()
+        .filter_map(|e| e.thumb_path.clone())
+        .chain(pinned.iter().filter_map(|p| p.thumb_path.clone()))
+        .collect()
+}
+
+/// Runs off the UI thread. Returns how many thumbnails were made.
+pub fn generate_thumbs(jobs: &[ThumbJob]) -> usize {
+    let mut made = 0;
+    for job in jobs {
+        let data = match &job.source {
+            ThumbSource::Cliphist(line) => {
+                match pipe_through(Command::new("cliphist").arg("decode"), line.as_bytes()) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                }
+            }
+            ThumbSource::File(p) => match std::fs::read(p) {
+                Ok(d) => d,
+                Err(_) => continue,
+            },
+        };
+        // write to a temp name, then rename: the UI never sees a half-written file
+        let tmp = job.out.with_extension("tmp.png");
+        let resize = format!("{s}x{s}^", s = THUMB_SIZE * 2);
+        let dest = format!("png:{}", tmp.display());
+        let ok = feed(Command::new("magick").args(["-", "-resize", &resize, &dest]), &data);
+        if ok && tmp.exists() && std::fs::rename(&tmp, &job.out).is_ok() {
+            made += 1;
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+    made
+}
+
+/// Delete cached thumbnails no longer referenced (cleared/deleted entries,
+/// unpinned items, and the old id-keyed cache files).
+pub fn prune_thumb_cache(keep: &HashSet<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(thumb_cache()) else { return };
+    for f in rd.flatten() {
+        let p = f.path();
+        if !keep.contains(&p) {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Display helpers
+// ---------------------------------------------------------------------------
 
 pub fn content_type(e: &ClipEntry) -> &'static str {
     if e.is_image {
@@ -555,11 +585,9 @@ pub fn parse_image_meta(preview: &str) -> Option<String> {
         .trim_start_matches("[[ binary data")
         .trim_end_matches("]]")
         .trim();
-    let parts: Vec<&str> = inner.split_whitespace().collect();
     let mut dims = None;
     let mut fmt = None;
-
-    for p in &parts {
+    for p in inner.split_whitespace() {
         if p.contains('x') && p.chars().all(|c| c.is_ascii_digit() || c == 'x') {
             dims = Some(p.to_string());
         }
@@ -567,24 +595,10 @@ pub fn parse_image_meta(preview: &str) -> Option<String> {
             fmt = Some(p.to_uppercase());
         }
     }
-
     match (dims, fmt) {
-        (Some(d), Some(f)) => Some(format!("{} -- {}", d, f)),
+        (Some(d), Some(f)) => Some(format!("{d} -- {f}")),
         (Some(d), None) => Some(d),
         (None, Some(f)) => Some(f),
         _ => None,
     }
-}
-
-pub fn get_filtered_entry(entries: &[ClipEntry], query: &str, idx: usize) -> Option<ClipEntry> {
-    let q = query.to_lowercase();
-    let filtered: Vec<&ClipEntry> = if q.is_empty() {
-        entries.iter().collect()
-    } else {
-        entries
-            .iter()
-            .filter(|e| e.preview.to_lowercase().contains(&q))
-            .collect()
-    };
-    filtered.get(idx).map(|e| (*e).clone())
 }

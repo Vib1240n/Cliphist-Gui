@@ -1,0 +1,12 @@
+[package]
+name = "launch-snippetd"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "launch-snippetd"
+path = "main.rs"
+
+[dependencies]
+snippets = { path = "../snippets" }
+libc = "0.2"

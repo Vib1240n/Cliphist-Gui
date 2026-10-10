@@ -1,0 +1,15 @@
+[Unit]
+Description=launch-gui snippet expander (type a trigger anywhere)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/launch-snippetd
+Restart=on-failure
+RestartSec=3
+# hard ceilings so it can never run away
+MemoryMax=32M
+TasksMax=16
+
+[Install]
+WantedBy=graphical-session.target

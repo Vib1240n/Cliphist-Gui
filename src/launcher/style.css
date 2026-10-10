@@ -177,3 +177,39 @@ window.background {
   background: #9ece6a;
   color: #1a1b26;
 }
+
+/* -- Preview pane (file search / browse) -- */
+.launch-preview {
+  background-color: alpha(#292c30, 0.4);
+  border-radius: 12px;
+  margin: 0 8px 8px 0;
+  padding: 12px;
+}
+
+.launch-preview-title {
+  color: #fcfcfc;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.launch-preview-meta {
+  color: alpha(#fcfcfc, 0.4);
+  font-size: 11px;
+  margin-bottom: 8px;
+}
+
+.launch-preview-row {
+  padding: 3px 2px;
+}
+
+.launch-preview-name {
+  color: alpha(#fcfcfc, 0.75);
+  font-size: 12px;
+}
+
+.launch-preview-text {
+  color: alpha(#fcfcfc, 0.75);
+  font-family: monospace;
+  font-size: 11px;
+}

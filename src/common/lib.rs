@@ -8,10 +8,11 @@ pub mod paths;
 pub mod vim;
 
 pub use cli::{
-    cmd_config, cmd_generate_config, cmd_reload, get_pid, pidfile_path, remove_pid, write_pid,
+    cmd_config, cmd_generate_config, cmd_reload, get_pid, pidfile_path, remove_pid, spawn_reaped,
+    write_pid,
 };
 pub use config::{parse_anchor, parse_bool, parse_easing, Anchor, ConfigBase, Easing};
-pub use css::{char_truncate, load_css, scroll_to_selected};
+pub use css::{apply_css, char_truncate, load_css, scroll_to_selected};
 pub use keys::{
     key_to_char, match_action, parse_action, parse_key_combos, parse_single_combo, Action,
     KeyCombo, VimMode,

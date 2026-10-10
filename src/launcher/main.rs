@@ -2,6 +2,7 @@ mod app;
 mod calc;
 mod config;
 mod desktop;
+mod files;
 mod search;
 mod ui;
 
@@ -40,6 +41,28 @@ fn main() {
             }
             "--config" => {
                 cmd_config(APP_NAME);
+                return;
+            }
+            "--snippet-key" => {
+                // Secret for \e snippets -> gnome-keyring. Never echoed or written to disk.
+                if snippets::key_from_keyring().is_some() && !args.iter().any(|a| a == "--force") {
+                    eprintln!("A snippet key already exists. Changing it makes existing \\e snippets unreadable.");
+                    eprintln!("Run `launch-gui --snippet-key --force` to replace it anyway.");
+                    std::process::exit(1);
+                }
+                let Some(a) = snippets::prompt_hidden("New snippet secret: ") else { return };
+                let Some(b) = snippets::prompt_hidden("Repeat: ") else { return };
+                if a.is_empty() || a != b {
+                    eprintln!("Secrets empty or don't match.");
+                    std::process::exit(1);
+                }
+                match snippets::store_secret(&a) {
+                    Ok(()) => println!("Stored in the keyring. \\e snippets can now be created."),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
+                }
                 return;
             }
             "--generate-config" => {

@@ -31,7 +31,49 @@ animation_easing = ease-out
 #   bounce      - overshoot and settle
 
 [keybinds]
+# Tab is reserved: it opens the folder browser (see below)
 select = Return Enter
 close = Escape
-next = Down Tab
-prev = Up Shift+Tab
+next = Down
+prev = Up
+clear_search = Ctrl+u
+page_down = Page_Down
+page_up = Page_Up
+first = Home
+last = End
+
+[files]
+# Typing this prefix switches to file search ("f'" -> f' report). Any text works.
+shortcut = f'
+# Folders to index. Hidden folders are skipped unless listed here.
+roots = ~, ~/.config
+# Added to the built-in excludes (node_modules, target, caches, /proc, ...).
+# Bare names match anywhere; ~/path or /path exclude that subtree.
+# exclude_only = ...  replaces the built-ins instead.
+exclude =
+max_results = 50
+# Rescan (in the background, on open) when the index is older than this.
+# A full rescan also runs on the first start after every boot; restarting
+# launch-gui alone loads the cached index instantly. Network/FUSE mounts
+# (rclone, gvfs, nfs, sshfs) are skipped unless listed in roots.
+rescan_secs = 300
+# Enter on text/code/config/log files: <terminal> -e <editor> <file>
+editor = nvim
+# Super+Enter opens folders with this
+file_manager = xdg-open
+
+# Browsing: Tab opens ~/ (or the selected folder / file's folder), typing
+# ~/ or / browses directly. Enter steps into folders / opens files, Left goes
+# up, Super+Enter opens the file manager, Ctrl+Shift+C copies the path.
+# File and browse modes show a preview pane (folder contents / file head).
+
+[snippets]
+enabled = false
+# Prefix that lists snippets in the launcher
+prefix = s'
+file = ~/.config/launch-gui/snippets
+# launch-snippetd: expand triggers typed in any app (needs the input group)
+expand = false
+# Create from the search bar:
+#   \p name | trigger = content     plain
+#   \e name | trigger = content     encrypted (run launch-gui --snippet-key once)
